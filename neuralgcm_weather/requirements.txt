@@ -1,0 +1,40 @@
+# NeuralGCM Weather — Dependencies
+# Install: pip install -r requirements.txt
+
+# Core ML
+jax[cpu]==0.4.30
+neuralgcm
+dinosaur
+dm-haiku
+
+# Data handling
+gcsfs
+zarr
+xarray
+pandas
+numpy
+scipy
+
+# Visualization
+matplotlib
+
+# API (Phase 2)
+fastapi
+uvicorn
+pydantic
+
+# Real-time ECMWF data
+ecmwf-opendata
+cfgrib
+
+# Configuration
+pyyaml
+python-dotenv
+loguru
+
+# Scheduler
+apscheduler
+
+# Testing
+pytest
+pytest-cov
