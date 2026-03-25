@@ -13,18 +13,18 @@ from neuralgcm_weather.model.extractor import VariableExtractor
 class TestPhysicalConversions:
 
     def test_q_to_rh_tropical_moist(self):
-        """Tropical boundary layer: q=20g/kg, T=30C -> RH should be ~90%"""
+        """Tropical boundary layer: q=20g/kg, T=30C -> RH ~61% (Tetens)"""
         q   = np.array([0.020])
         T_K = np.array([303.15])  # 30C
         rh  = VariableExtractor.q_to_rh(q, T_K, 850)
-        assert 70 < rh[0] < 100, f"Expected RH 70-100%, got {rh[0]:.1f}%"
+        assert 50 < rh[0] < 100, f"Expected RH 50-100%, got {rh[0]:.1f}%"
 
     def test_q_to_rh_dry_desert(self):
-        """Sahara desert: q=2g/kg, T=45C -> RH should be ~10-20%"""
+        """Sahara desert: q=2g/kg, T=45C -> RH ~2.5% (Tetens, extreme heat)"""
         q   = np.array([0.002])
         T_K = np.array([318.15])  # 45C
         rh  = VariableExtractor.q_to_rh(q, T_K, 850)
-        assert 5 < rh[0] < 35, f"Expected RH 5-35%, got {rh[0]:.1f}%"
+        assert 0 < rh[0] < 20, f"Expected RH 0-20%, got {rh[0]:.1f}%"
 
     def test_rh_always_0_to_100(self):
         """RH must never exceed 0-100%."""
