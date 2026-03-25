@@ -1,0 +1,70 @@
+# ═══════════════════════════════════════════════════════════════
+# NeuralGCM Weather — Master Configuration
+# Change values here. Never edit Python files for config.
+# ═══════════════════════════════════════════════════════════════
+
+model:
+  checkpoint: "v1/deterministic_2_8_deg.pkl"
+  gcs_bucket: "gs://neuralgcm/models"
+  # Options: deterministic_2_8_deg, deterministic_1_4_deg,
+  #          deterministic_0_7_deg, stochastic_1_4_deg
+  forecast_days: 5
+  timestep_hours: 24
+
+data:
+  mode: "realtime"          # "realtime" or "historical"
+  era5_zarr: "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3"
+  cache_dir: "./cache"
+  ecmwf_lag_hours: 6        # ECMWF open data available after ~6h lag
+
+# For historical mode only
+historical:
+  init_date: "2020-03-25T00:00"
+
+# Default forecast location (overridden by CLI args)
+location:
+  name: "Chennai, India"
+  lat: 13.0827
+  lon: 80.2707
+
+# Scheduled runs (APScheduler)
+scheduler:
+  enabled: true
+  interval_hours: 6          # run every 6 hours
+  locations:                 # all locations to forecast each run
+    - name: "Chennai, India"
+      lat: 13.0827
+      lon: 80.2707
+    - name: "Delhi, India"
+      lat: 28.6139
+      lon: 77.2090
+    - name: "Mumbai, India"
+      lat: 19.0760
+      lon: 72.8777
+    - name: "London, UK"
+      lat: 51.5074
+      lon: -0.1278
+    - name: "New York, USA"
+      lat: 40.7128
+      lon: -74.0060
+
+output:
+  save_dir: "./forecasts"
+  save_png: true
+  save_json: true
+  save_csv: true
+  png_dpi: 150
+
+# Physical sanity bounds — alerts if forecast exceeds these
+sanity:
+  temperature_c:   {min: -90,  max: 60}
+  rh_percent:      {min: 0,    max: 100}
+  wind_speed_ms:   {min: 0,    max: 120}
+  tpw_mm:          {min: 0,    max: 100}
+  z500_m:          {min: 4500, max: 6500}
+  mslp_hpa:        {min: 870,  max: 1085}
+  lapse_rate_ckm:  {min: -5,   max: 20}
+
+logging:
+  level: "INFO"
+  file: "./logs/neuralgcm.log"
