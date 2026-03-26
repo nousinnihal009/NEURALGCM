@@ -1,140 +1,233 @@
 """
-Forecast Plotter
-================
-Generates a multi-panel matplotlib dashboard from ForecastPoint data.
-Dark theme matching the original forecast_anywhere.py aesthetics.
+10-Panel NeuralGCM Weather Dashboard
+=====================================
+Dark-themed matplotlib dashboard matching original forecast_anywhere.py
+panel count. All panels labelled with units, thresholds, and location.
+ERA5 ground-truth overlay is drawn when era5_truth dict is provided.
 """
 
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from loguru import logger
+import matplotlib.gridspec as gridspec
+from matplotlib.patches import Circle
+import warnings
+warnings.filterwarnings("ignore")
 
-DARK   = "#0d1117"
-PANEL  = "#161b22"
-BORDER = "#30363d"
-W      = "white"
+BG     = "#0d1117"
+FG     = "#e6edf3"
+ACCENT = "#58a6ff"
+WARN   = "#f85149"
+OK     = "#3fb950"
 
 
-def plot_forecast(fp, output_path: str, dpi: int = 150):
-    """Generate a 6-panel forecast dashboard PNG."""
-    N = fp.days + 1
-    X = np.arange(N)
-    date_labels = [dt.strftime("%a\n%d %b") for dt in fp.dates]
+def plot_forecast(fp, output_path: str, era5_truth: dict = None,
+                  dpi: int = 150) -> None:
+    """
+    Generate a 10-panel weather dashboard PNG.
 
-    fig, axes = plt.subplots(2, 3, figsize=(20, 12), facecolor=DARK)
-    fig.subplots_adjust(top=0.90, bottom=0.08, left=0.06,
-                        right=0.96, hspace=0.35, wspace=0.25)
+    Args:
+        fp:           ForecastPoint object (NeuralGCM output)
+        output_path:  path to save PNG
+        era5_truth:   optional dict mapping variable name → np.ndarray
+                      of ERA5 ground-truth values for overlay
+        dpi:          output resolution (default 150)
+    """
+    days = np.arange(fp.days + 1)
+    dates_short = [d.strftime("%a\n%d %b") for d in fp.dates]
 
-    # Title bar
-    fig.text(0.5, 0.97, "NeuralGCM Weather Forecast",
-             ha="center", va="top", color=W,
-             fontsize=18, fontweight="bold")
-    fig.text(0.5, 0.935,
-             f"{fp.location_name}  |  "
-             f"{fp.lat:.4f}°N, {fp.lon:.4f}°E  |  "
-             f"{fp.dates[0].strftime('%d %b %Y')} → "
-             f"{fp.dates[-1].strftime('%d %b %Y')}",
-             ha="center", va="top", color="#8B949E", fontsize=10)
+    fig = plt.figure(figsize=(22, 18), facecolor=BG)
+    gs  = gridspec.GridSpec(
+        4, 3,
+        figure=fig,
+        hspace=0.55,
+        wspace=0.35,
+        left=0.06, right=0.97,
+        top=0.92,  bottom=0.06,
+    )
 
-    def setup(ax, title, ylabel):
-        ax.set_facecolor(PANEL)
-        ax.set_title(title, color="#58A6FF", fontsize=11,
-                     fontweight="bold", pad=8, loc="left")
-        ax.set_ylabel(ylabel, color=W, fontsize=9)
-        ax.set_xticks(X)
-        ax.set_xticklabels(date_labels, color=W, fontsize=8)
-        ax.tick_params(axis="y", colors=W, labelsize=8)
-        ax.grid(True, color=BORDER, ls="--", alpha=0.5, lw=0.6)
+    axes = [fig.add_subplot(gs[r, c])
+            for r in range(3) for c in range(3)]
+    # Panel 10 (world map) spans bottom row
+    ax_map = fig.add_subplot(gs[3, :])
+
+    def style(ax, title, ylabel, unit=""):
+        ax.set_facecolor(BG)
+        ax.set_title(title, color=FG, fontsize=9, pad=4,
+                     fontweight="bold")
+        ax.set_ylabel(f"{ylabel} ({unit})" if unit else ylabel,
+                      color=FG, fontsize=7)
+        ax.tick_params(colors=FG, labelsize=7)
         for sp in ax.spines.values():
-            sp.set_edgecolor(BORDER)
-        ax.set_xlim(-0.4, N - 0.6)
+            sp.set_color("#30363d")
+        ax.set_xticks(days)
+        ax.set_xticklabels(dates_short, fontsize=6.5)
+        ax.grid(axis="y", color="#21262d", linewidth=0.5)
 
-    # Panel 1: Temperature
-    ax = axes[0, 0]
-    if fp.temperature_c_850 is not None:
-        ax.plot(X, fp.temperature_c_850, color="#F78166", lw=2.5,
-                marker="o", ms=6, label="850 hPa")
-        ax.fill_between(X, fp.temperature_c_850 - 2,
-                        fp.temperature_c_850 + 2,
-                        color="#F78166", alpha=0.12)
-    if fp.temperature_c_500 is not None:
-        ax.plot(X, fp.temperature_c_500, color="#EF9F27", lw=1.8,
-                marker="s", ms=4, ls="--", label="500 hPa")
-    setup(ax, "Temperature", "°C")
-    ax.legend(fontsize=7, facecolor=PANEL, labelcolor=W, edgecolor=BORDER)
+    def plot_var(ax, arr, color, label="", truth=None,
+                 hline=None, hline_label=""):
+        if arr is None:
+            ax.text(0.5, 0.5, "N/A", color="#888", ha="center",
+                    va="center", transform=ax.transAxes)
+            return
+        ax.plot(days, arr, color=color, lw=2, marker="o",
+                ms=4, label=label)
+        if truth is not None:
+            ax.plot(days, truth, color="white", lw=1.5,
+                    linestyle="--", alpha=0.7, label="ERA5 truth")
+            ax.legend(fontsize=6, facecolor="#161b22",
+                      labelcolor=FG, framealpha=0.8)
+        if hline is not None:
+            ax.axhline(hline, color=WARN, lw=0.8,
+                       linestyle=":", alpha=0.7)
+            ax.text(days[-1], hline, f" {hline_label}",
+                    color=WARN, fontsize=6, va="bottom")
 
-    # Panel 2: Geopotential Height
-    ax = axes[0, 1]
-    if fp.z500_m is not None:
-        ax.plot(X, fp.z500_m, color="#BD8EE6", lw=2.5,
-                marker="o", ms=6, label="Z500")
-    setup(ax, "Geopotential Height (500 hPa)", "m")
-    ax.legend(fontsize=7, facecolor=PANEL, labelcolor=W, edgecolor=BORDER)
+    truth = era5_truth or {}
 
-    # Panel 3: Relative Humidity
-    ax = axes[0, 2]
-    if fp.rh_850 is not None:
-        ax.bar(X - 0.15, fp.rh_850, 0.28, color="#58A6FF",
-               alpha=0.8, label="850 hPa")
-    if fp.rh_500 is not None:
-        ax.bar(X + 0.15, fp.rh_500, 0.28, color="#1D9E75",
-               alpha=0.75, label="500 hPa")
-    ax.axhline(80, color="#F78166", lw=0.9, ls="--", alpha=0.6)
-    ax.set_ylim(0, 115)
-    setup(ax, "Relative Humidity", "%")
-    ax.legend(fontsize=7, facecolor=PANEL, labelcolor=W, edgecolor=BORDER)
+    # ── Panel 1: Temperature 850 hPa ─────────────────────────
+    ax = axes[0]
+    plot_var(ax, fp.temperature_c_850, ACCENT, "T@850hPa",
+             truth=truth.get("temperature_c_850"))
+    style(ax, "Temperature @ 850 hPa", "°C")
 
-    # Panel 4: Precipitable Water
-    ax = axes[1, 0]
-    if fp.tpw_mm is not None:
-        ax.fill_between(X, 0, fp.tpw_mm, color="#A5D6FF", alpha=0.4)
-        ax.plot(X, fp.tpw_mm, color="#A5D6FF", lw=2.5,
-                marker="o", ms=6, label="TPW")
-    ax.axhline(60, color="#F78166", lw=0.9, ls="--", alpha=0.6)
-    ax.set_ylim(bottom=0)
-    setup(ax, "Total Precipitable Water", "mm")
-    ax.legend(fontsize=7, facecolor=PANEL, labelcolor=W, edgecolor=BORDER)
+    # ── Panel 2: Relative Humidity 850 hPa ───────────────────
+    ax = axes[1]
+    plot_var(ax, fp.rh_850, "#79c0ff", "RH@850hPa",
+             truth=truth.get("rh_850"), hline=70, hline_label="70%")
+    style(ax, "Relative Humidity @ 850 hPa", "%")
+    ax.set_ylim(0, 105)
 
-    # Panel 5: Wind Speed
-    ax = axes[1, 1]
-    if fp.wind_speed_850 is not None:
-        ax.plot(X, fp.wind_speed_850, color="#3FB950", lw=2.5,
-                marker="o", ms=6, label="850 hPa")
-    if fp.wind_speed_500 is not None:
-        ax.plot(X, fp.wind_speed_500, color="#EF9F27", lw=2,
-                marker="s", ms=4, ls="--", label="500 hPa")
-    if fp.wind_speed_250 is not None:
-        ax.plot(X, fp.wind_speed_250, color="#F78166", lw=1.5,
-                marker="^", ms=4, ls=":", label="250 hPa (jet)")
-    setup(ax, "Wind Speed", "m/s")
-    ax.legend(fontsize=7, facecolor=PANEL, labelcolor=W, edgecolor=BORDER)
+    # ── Panel 3: Total Precipitable Water ────────────────────
+    ax = axes[2]
+    plot_var(ax, fp.tpw_mm, "#56d364", "TPW",
+             truth=truth.get("tpw_mm"), hline=60, hline_label="60mm")
+    style(ax, "Total Precipitable Water", "mm")
 
-    # Panel 6: Surface Pressure
-    ax = axes[1, 2]
-    if fp.mslp_hpa is not None:
-        ax.plot(X, fp.mslp_hpa, color="#58A6FF", lw=2.5,
-                marker="o", ms=6, label="MSLP")
-        ax.axhline(1013.25, color=W, lw=0.8, ls=":", alpha=0.4,
-                   label="Std atm")
-    elif fp.lapse_rate is not None:
-        ax.plot(X, fp.lapse_rate, color="#BD8EE6", lw=2.5,
-                marker="o", ms=6, label="Lapse Rate")
-        ax.axhline(6.5, color=W, lw=0.8, ls=":", alpha=0.4,
-                   label="Std atm 6.5°C/km")
-        setup(ax, "Atmospheric Stability", "°C/km")
-        ax.legend(fontsize=7, facecolor=PANEL, labelcolor=W,
-                  edgecolor=BORDER)
+    # ── Panel 4: Wind Speed 850 / 500 / 250 hPa ──────────────
+    ax = axes[3]
+    for arr, col, lbl in [
+        (fp.wind_speed_850, ACCENT,   "850 hPa"),
+        (fp.wind_speed_500, "#d2a8ff","500 hPa"),
+        (fp.wind_speed_250, "#ff7b72","250 hPa"),
+    ]:
+        if arr is not None:
+            ax.plot(days, arr, color=col, lw=1.8,
+                    marker="o", ms=3, label=lbl)
+    ax.legend(fontsize=6, facecolor="#161b22",
+              labelcolor=FG, framealpha=0.8)
+    style(ax, "Wind Speed (3 levels)", "m/s")
+
+    # ── Panel 5: Geopotential Height Z500 ────────────────────
+    ax = axes[4]
+    plot_var(ax, fp.z500_m, "#ffa657", "Z500",
+             truth=truth.get("z500_m"))
+    style(ax, "Geopotential Height Z500", "m")
+
+    # ── Panel 6: Surface Pressure ─────────────────────────────
+    ax = axes[5]
+    plot_var(ax, fp.mslp_hpa, "#ff7b72", "SP",
+             truth=truth.get("mslp_hpa"))
+    style(ax, "Surface Pressure", "hPa")
+
+    # ── Panel 7: Cloud Water Content (850 hPa) ───────────────
+    ax = axes[6]
+    if fp.clwc_gkg_850 is not None:
+        ax.bar(days, fp.clwc_gkg_850, color=ACCENT,
+               alpha=0.7, label="Liquid")
+    if fp.ciwc_gkg_850 is not None:
+        ax.bar(days, fp.ciwc_gkg_850, color="#d2a8ff",
+               alpha=0.7, label="Ice", bottom=fp.clwc_gkg_850
+               if fp.clwc_gkg_850 is not None else None)
+    ax.legend(fontsize=6, facecolor="#161b22",
+              labelcolor=FG, framealpha=0.8)
+    style(ax, "Cloud Water @ 850 hPa (Liquid + Ice)", "g/kg")
+
+    # ── Panel 8: Lapse Rate 850→500 hPa ──────────────────────
+    ax = axes[7]
+    plot_var(ax, fp.lapse_rate, "#ffa657", "Lapse rate",
+             hline=9.8, hline_label="DALR")
+    if fp.lapse_rate is not None:
+        ax.axhline(6.5, color=OK, lw=0.8, linestyle=":",
+                   alpha=0.7)
+        ax.text(days[-1], 6.5, " MALR", color=OK,
+                fontsize=6, va="bottom")
+    style(ax, "Lapse Rate 850→500 hPa", "°C/km")
+
+    # ── Panel 9: Vorticity 850 hPa ───────────────────────────
+    ax = axes[8]
+    if fp.vorticity_850 is not None:
+        colors = [WARN if v > 0 else ACCENT
+                  for v in fp.vorticity_850]
+        ax.bar(days, fp.vorticity_850, color=colors, alpha=0.8)
+        ax.axhline(0, color=FG, lw=0.6, linestyle="-")
     else:
-        ax.text(0.5, 0.5, "No Data", transform=ax.transAxes,
-                ha="center", va="center", color="#8B949E", fontsize=14)
-    if fp.mslp_hpa is not None:
-        setup(ax, "Surface Pressure", "hPa")
-        ax.legend(fontsize=7, facecolor=PANEL, labelcolor=W,
-                  edgecolor=BORDER)
+        ax.text(0.5, 0.5, "N/A", color="#888", ha="center",
+                va="center", transform=ax.transAxes)
+    style(ax, "Relative Vorticity @ 850 hPa", "1/s × 10⁻⁵")
 
-    fig.savefig(output_path, dpi=dpi, bbox_inches="tight",
-                facecolor=DARK)
+    # ── Panel 10: World Map with Location Marker ─────────────
+    ax_map.set_facecolor("#0d1f2d")
+    ax_map.set_xlim(-180, 180)
+    ax_map.set_ylim(-90, 90)
+    try:
+        import cartopy.crs as ccrs
+        import cartopy.feature as cfeature
+        # If cartopy available, use it
+        ax_map.remove()
+        ax_map = fig.add_subplot(gs[3, :],
+                                 projection=ccrs.PlateCarree())
+        ax_map.set_facecolor("#0d1f2d")
+        ax_map.add_feature(cfeature.LAND,   facecolor="#161b22",
+                           edgecolor="#30363d", linewidth=0.4)
+        ax_map.add_feature(cfeature.OCEAN,  facecolor="#0d1f2d")
+        ax_map.add_feature(cfeature.BORDERS,edgecolor="#21262d",
+                           linewidth=0.3)
+        ax_map.set_global()
+    except ImportError:
+        # Fallback: plain axes with coast approximation
+        ax_map.set_xlabel("Longitude", color=FG, fontsize=8)
+        ax_map.set_ylabel("Latitude",  color=FG, fontsize=8)
+        ax_map.tick_params(colors=FG, labelsize=7)
+        for sp in ax_map.spines.values():
+            sp.set_color("#30363d")
+        ax_map.grid(color="#21262d", linewidth=0.4)
+
+    # Plot location marker
+    ax_map.plot(fp.lon, fp.lat, "o", color=WARN,
+                ms=8, zorder=5, transform=getattr(
+                    ax_map, "transData", None) or ax_map.transData)
+    for r, alpha in [(5, 0.15), (10, 0.08), (20, 0.04)]:
+        circle = Circle((fp.lon, fp.lat), r,
+                         color=WARN, fill=True,
+                         alpha=alpha, zorder=4,
+                         transform=getattr(
+                             ax_map, "transData", None)
+                         or ax_map.transData)
+        ax_map.add_patch(circle)
+    ax_map.annotate(
+        f" {fp.location_name}\n ({fp.lat:.2f}°N, {fp.lon:.2f}°E)",
+        xy=(fp.lon, fp.lat),
+        color=FG, fontsize=8, fontweight="bold",
+        bbox=dict(boxstyle="round,pad=0.3",
+                  facecolor="#161b22", edgecolor=ACCENT,
+                  alpha=0.9),
+    )
+    ax_map.set_title("Forecast Location", color=FG,
+                     fontsize=9, fontweight="bold")
+
+    # ── Figure title ──────────────────────────────────────────
+    init_str = fp.dates[0].strftime("%d %B %Y %H:%M UTC")
+    fig.suptitle(
+        f"NeuralGCM  ·  {fp.location_name}  ·  "
+        f"Init: {init_str}  ·  "
+        f"{fp.days}-Day Forecast",
+        color=FG, fontsize=13, fontweight="bold", y=0.975,
+    )
+
+    plt.savefig(output_path, dpi=dpi, bbox_inches="tight",
+                facecolor=BG)
     plt.close(fig)
-    logger.success(f"Dashboard saved: {output_path}")
+    from loguru import logger
+    logger.success(f"10-panel dashboard saved: {output_path}")
