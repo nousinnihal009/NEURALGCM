@@ -207,7 +207,7 @@ def _update_job_status(job_id: str, status: str,
                    result=%s, sanity_ok=%s, sanity_violations=%s,
                    json_path=%s, csv_path=%s, png_path=%s,
                    model_lat=%s, model_lon=%s, init_time_utc=%s,
-                   mode_used=%s
+                   mode_used=%s, geom=ST_SetSRID(ST_MakePoint(%s, %s), 4326)
                    WHERE id=%s""",
                 (status, datetime.utcnow(),
                  result.get("elapsed_seconds"),
@@ -221,6 +221,7 @@ def _update_job_status(job_id: str, status: str,
                  result.get("model_lon"),
                  result.get("init_time_utc"),
                  result.get("mode_used"),
+                 result.get("lon"), result.get("lat"),
                  job_id))
         elif status == "failed":
             cur.execute(
