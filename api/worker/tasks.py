@@ -53,8 +53,10 @@ class NeuralGCMTask(Task):
     bind=True,
     base=NeuralGCMTask,
     name="neuralgcm.run_forecast",
-    max_retries=2,
-    default_retry_delay=30,
+    autoretry_for=(Exception,),
+    retry_kwargs={'max_retries': 2},
+    retry_backoff=True,
+    retry_jitter=True,
 )
 def run_forecast_task(
     self,
@@ -178,8 +180,6 @@ def run_forecast_task(
     except Exception as exc:
         logger.error(f"Task failed | job={job_id} | error={exc}")
         _update_job_status(job_id, "failed", error=str(exc))
-        if self.request.retries < self.max_retries:
-            raise self.retry(exc=exc)
         raise exc
 
 
