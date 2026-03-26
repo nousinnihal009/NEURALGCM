@@ -1,42 +1,87 @@
 """
-Disk Cache Manager
-==================
-Simple disk caching for downloaded data and regridded states.
+Init State Disk Cache
+======================
+Caches regridded ERA5/ECMWF init states to disk as NetCDF.
+Cache key = (source, init_date_str, model_checkpoint).
+Prevents re-downloading and re-regridding the same data.
 """
 
-import os
 import hashlib
-import pickle
+import numpy as np
+import xarray as xr
+import pandas as pd
 from pathlib import Path
 from loguru import logger
+from typing import Optional
 
 
-class DiskCache:
-    """Simple file-based cache for intermediate data."""
+def _cache_key(source: str, init_time: pd.Timestamp,
+               checkpoint: str) -> str:
+    raw = f"{source}|{init_time.isoformat()}|{checkpoint}"
+    return hashlib.md5(raw.encode()).hexdigest()[:12]
 
-    def __init__(self, cache_dir: str = "./cache"):
-        self.cache_dir = Path(cache_dir)
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-    def _key_path(self, key: str) -> Path:
-        h = hashlib.md5(key.encode()).hexdigest()
-        return self.cache_dir / f"{h}.pkl"
+def cache_path(cache_dir: str, source: str,
+               init_time: pd.Timestamp,
+               checkpoint: str) -> Path:
+    key = _cache_key(source, init_time, checkpoint)
+    return Path(cache_dir) / "init_states" / f"{key}.nc"
 
-    def get(self, key: str):
-        path = self._key_path(key)
-        if path.exists():
-            logger.debug(f"Cache hit: {key}")
-            with open(path, "rb") as f:
-                return pickle.load(f)
-        return None
 
-    def put(self, key: str, value):
-        path = self._key_path(key)
-        with open(path, "wb") as f:
-            pickle.dump(value, f)
-        logger.debug(f"Cached: {key} -> {path}")
+def load_cached_init_state(
+    cache_dir: str,
+    source: str,
+    init_time: pd.Timestamp,
+    checkpoint: str,
+) -> Optional[xr.Dataset]:
+    """Return cached regridded init state, or None if not cached."""
+    p = cache_path(cache_dir, source, init_time, checkpoint)
+    if p.exists():
+        try:
+            ds = xr.open_dataset(str(p))
+            logger.info(
+                f"Init state cache HIT | "
+                f"source={source} | time={init_time} | {p.name}")
+            return ds
+        except Exception as e:
+            logger.warning(f"Cache read failed ({p}): {e}")
+            p.unlink(missing_ok=True)
+    return None
 
-    def clear(self):
-        for f in self.cache_dir.glob("*.pkl"):
+
+def save_init_state_to_cache(
+    ds: xr.Dataset,
+    cache_dir: str,
+    source: str,
+    init_time: pd.Timestamp,
+    checkpoint: str,
+) -> None:
+    """Save regridded init state to disk cache."""
+    p = cache_path(cache_dir, source, init_time, checkpoint)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        ds.to_netcdf(str(p))
+        size_mb = p.stat().st_size / 1e6
+        logger.success(
+            f"Init state cached ({size_mb:.1f} MB) | "
+            f"source={source} | time={init_time} | {p.name}")
+    except Exception as e:
+        logger.warning(f"Cache write failed: {e}")
+
+
+def clear_old_cache(cache_dir: str, max_age_days: int = 7) -> int:
+    """Delete cached files older than max_age_days. Returns count deleted."""
+    cache_root = Path(cache_dir) / "init_states"
+    if not cache_root.exists():
+        return 0
+    cutoff = pd.Timestamp.now() - pd.Timedelta(days=max_age_days)
+    deleted = 0
+    for f in cache_root.glob("*.nc"):
+        mtime = pd.Timestamp(f.stat().st_mtime, unit="s")
+        if mtime < cutoff:
             f.unlink()
-        logger.info("Cache cleared")
+            deleted += 1
+    if deleted:
+        logger.info(f"Cache cleaned: {deleted} files older than "
+                    f"{max_age_days} days deleted")
+    return deleted
