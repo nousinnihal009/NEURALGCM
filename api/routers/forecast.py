@@ -10,10 +10,11 @@ DELETE /api/v1/forecast/{id} → cancel pending job
 import uuid
 from datetime import datetime
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, func
 from loguru import logger
+from geoalchemy2.elements import WKTElement
 
 from api.models.database import get_db
 from api.models.forecast_run import ForecastRun, ForecastStatus, ForecastMode
@@ -24,6 +25,8 @@ from api.cache.redis_client import (
     build_cache_key, get_cached_forecast, set_cached_forecast)
 from api.dependencies import get_current_api_key
 from api.settings import get_settings
+from api.main import limiter
+
 
 settings = get_settings()
 router   = APIRouter(prefix="/forecast", tags=["Forecasts"])
@@ -52,16 +55,18 @@ atmospheric stability lapse rate, cloud water content, vorticity.
     """,
     status_code=202,
 )
+@limiter.limit("30/minute")
 async def submit_forecast(
-    request: ForecastRequest,
+    request: Request,
+    body: ForecastRequest,
     db: AsyncSession = Depends(get_db),
     api_key=Depends(get_current_api_key),
 ):
     # ── Check cache first ─────────────────────────────────────
     cache_key = build_cache_key(
-        request.lat, request.lon,
-        request.days, request.mode.value,
-        request.init_date,
+        body.lat, body.lon,
+        body.days, body.mode.value,
+        body.init_date,
     )
     cached = await get_cached_forecast(cache_key)
     if cached:
@@ -71,17 +76,18 @@ async def submit_forecast(
         cached["is_cached"] = True
         cached["status"]    = "complete"
         logger.info(
-            f"Cache hit for {request.location_name} "
-            f"({request.lat},{request.lon}) → returning cached")
+            f"Cache hit for {body.location_name} "
+            f"({body.lat},{body.lon}) → returning cached")
 
         # Store cache hit in DB
         run = ForecastRun(
             id=uuid.UUID(job_id),
-            location_name=request.location_name,
-            lat=request.lat, lon=request.lon,
-            forecast_days=request.days,
-            init_date=request.init_date,
-            mode=ForecastMode(request.mode.value),
+            location_name=body.location_name,
+            lat=body.lat, lon=body.lon,
+            geom=WKTElement(f"POINT({body.lon} {body.lat})", srid=4326),
+            forecast_days=body.days,
+            init_date=body.init_date,
+            mode=ForecastMode(body.mode.value),
             status=ForecastStatus.CACHED,
             is_cached=True,
             cache_key=cache_key,
@@ -105,11 +111,12 @@ async def submit_forecast(
     job_id = str(uuid.uuid4())
     run = ForecastRun(
         id=uuid.UUID(job_id),
-        location_name=request.location_name,
-        lat=request.lat, lon=request.lon,
-        forecast_days=request.days,
-        init_date=request.init_date,
-        mode=ForecastMode(request.mode.value),
+        location_name=body.location_name,
+        lat=body.lat, lon=body.lon,
+        geom=WKTElement(f"POINT({body.lon} {body.lat})", srid=4326),
+        forecast_days=body.days,
+        init_date=body.init_date,
+        mode=ForecastMode(body.mode.value),
         status=ForecastStatus.PENDING,
         cache_key=cache_key,
         created_at=datetime.utcnow(),
@@ -123,12 +130,12 @@ async def submit_forecast(
     task = run_forecast_task.apply_async(
         kwargs={
             "job_id":        job_id,
-            "location_name": request.location_name,
-            "lat":           request.lat,
-            "lon":           request.lon,
-            "days":          request.days,
-            "mode":          request.mode.value,
-            "init_date":     request.init_date,
+            "location_name": body.location_name,
+            "lat":           body.lat,
+            "lon":           body.lon,
+            "days":          body.days,
+            "mode":          body.mode.value,
+            "init_date":     body.init_date,
         },
         task_id=job_id,
     )
@@ -139,12 +146,12 @@ async def submit_forecast(
 
     logger.info(
         f"Forecast queued | job={job_id} | "
-        f"loc={request.location_name} | mode={request.mode.value}")
+        f"loc={body.location_name} | mode={body.mode.value}")
 
     return ForecastJobResponse(
         job_id=job_id,
         status="pending",
-        message=(f"Forecast queued for {request.location_name}. "
+        message=(f"Forecast queued for {body.location_name}. "
                  f"Poll the poll_url for results."),
         poll_url=f"{settings.api_prefix}/forecast/{job_id}",
         estimated_seconds=45,
@@ -199,6 +206,15 @@ async def get_forecast(
         if cache_key and not run.is_cached:
             await set_cached_forecast(cache_key, r)
 
+        import os as _os
+
+        def _static_url(raw_path: str | None) -> str | None:
+            if not raw_path:
+                return None
+            # Strip to filename only — files live in ./forecasts/
+            fname = _os.path.basename(raw_path)
+            return f"/static/forecasts/{fname}"
+
         return ForecastResultResponse(
             **base,
             model_lat       = r.get("model_lat"),
@@ -209,13 +225,69 @@ async def get_forecast(
             daily           = daily,
             sanity_ok       = r.get("sanity_ok"),
             sanity_violations = r.get("sanity_violations"),
-            png_url         = (f"/static/{r['png_path']}"
-                               if r.get("png_path") else None),
-            csv_url         = (f"/static/{r['csv_path']}"
-                               if r.get("csv_path") else None),
+            png_url         = _static_url(r.get("png_path")),
+            csv_url         = _static_url(r.get("csv_path")),
+            json_url        = _static_url(r.get("json_path")),
         )
 
     return ForecastResultResponse(**base, daily=[])
+
+
+@router.delete(
+    "/{job_id}",
+    status_code=204,
+    summary="Cancel a pending forecast job or delete a completed record",
+    description="""
+Cancel a **pending** or **running** job (revokes the Celery task).
+Delete the DB record for **complete** or **failed** jobs.
+Returns 204 No Content on success.
+Returns 409 Conflict if the job is already running and cannot be safely
+cancelled (Celery task has already begun NeuralGCM inference).
+    """,
+)
+async def delete_forecast(
+    job_id: str,
+    request: Request,
+    force: bool = Query(
+        default=False,
+        description="Force-delete even if status is running"),
+    db: AsyncSession = Depends(get_db),
+    api_key=Depends(get_current_api_key),
+):
+    try:
+        uid = uuid.UUID(job_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid job ID format")
+
+    result = await db.execute(
+        select(ForecastRun).where(ForecastRun.id == uid))
+    run = result.scalar_one_or_none()
+
+    if not run:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
+    if run.status == ForecastStatus.RUNNING and not force:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Job is currently running. NeuralGCM inference is in "
+                "progress and cannot be cleanly cancelled. Use "
+                "?force=true to delete the DB record anyway (the "
+                "Celery task will complete or fail independently)."))
+
+    # Revoke Celery task if still pending
+    if run.status == ForecastStatus.PENDING and run.celery_id:
+        try:
+            from api.worker.celery_app import celery_app
+            celery_app.control.revoke(run.celery_id, terminate=False)
+            logger.info(f"Celery task {run.celery_id} revoked for job {job_id}")
+        except Exception as e:
+            logger.warning(f"Could not revoke Celery task: {e}")
+
+    await db.delete(run)
+    await db.commit()
+    logger.info(f"Forecast job {job_id} deleted (status was {run.status.value})")
+    # 204 No Content — FastAPI returns empty body automatically
 
 
 @router.get(
@@ -223,7 +295,9 @@ async def get_forecast(
     response_model=ForecastListResponse,
     summary="List past forecast runs with pagination",
 )
+@limiter.limit("120/minute")
 async def list_forecasts(
+    request: Request,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
     status: Optional[str] = Query(default=None),
