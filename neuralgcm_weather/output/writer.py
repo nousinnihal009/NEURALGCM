@@ -16,7 +16,8 @@ from datetime import datetime
 def save_forecast(fp, save_dir: str = "./forecasts",
                   save_png: bool = True,
                   save_json: bool = True,
-                  save_csv: bool = True) -> dict:
+                  save_csv: bool = True,
+                  era5_truth: dict = None) -> dict:
     """
     Save a ForecastPoint to disk.
     Returns dict of saved file paths.
@@ -64,7 +65,7 @@ def save_forecast(fp, save_dir: str = "./forecasts",
         try:
             from neuralgcm_weather.output.plotter import plot_forecast
             png_path = run_dir / "forecast.png"
-            plot_forecast(fp, str(png_path))
+            plot_forecast(fp, str(png_path), era5_truth=era5_truth)
             saved["png"] = str(png_path)
         except Exception as e:
             logger.warning(f"PNG generation failed: {e}")
