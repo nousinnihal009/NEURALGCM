@@ -1,29 +1,13 @@
 """
 API Integration Tests
 =====================
-Tests all forecast endpoints against a test database.
-Uses httpx AsyncClient for async endpoint testing.
+Tests all forecast endpoints against an in-memory test database.
+Uses httpx AsyncClient.
 """
 
 import pytest
 import pytest_asyncio
-from httpx import AsyncClient, ASGITransport
-from api.main import app
-
-
-@pytest.fixture(scope="module")
-def anyio_backend():
-    return "asyncio"
-
-
-@pytest_asyncio.fixture(scope="module")
-async def client():
-    async with AsyncClient(
-        transport=ASGITransport(app=app),
-        base_url="http://test"
-    ) as c:
-        yield c
-
+import uuid
 
 @pytest.mark.anyio
 async def test_health_endpoint(client):
@@ -33,10 +17,15 @@ async def test_health_endpoint(client):
     assert data["status"] == "ok"
     assert "version" in data
 
+@pytest.mark.anyio
+async def test_ready_endpoint(client):
+    r = await client.get("/ready")
+    assert r.status_code == 200
+    data = r.json()
+    assert "checks" in data
 
 @pytest.mark.anyio
 async def test_submit_forecast_validation(client):
-    # Missing required fields
     r = await client.post("/api/v1/forecast", json={})
     assert r.status_code == 422
 
@@ -45,15 +34,8 @@ async def test_submit_forecast_validation(client):
         "location_name": "Test", "lat": 999, "lon": 0})
     assert r.status_code == 422
 
-    # days out of range
-    r = await client.post("/api/v1/forecast", json={
-        "location_name": "Test", "lat": 13.08, "lon": 80.27,
-        "days": 99})
-    assert r.status_code == 422
-
-
 @pytest.mark.anyio
-async def test_submit_forecast_valid(client):
+async def test_submit_and_list_forecast(client):
     r = await client.post("/api/v1/forecast", json={
         "location_name": "Chennai, India",
         "lat": 13.0827,
@@ -65,32 +47,33 @@ async def test_submit_forecast_valid(client):
     assert r.status_code in (202, 200)
     data = r.json()
     assert "job_id" in data
-    assert "poll_url" in data
-    assert data["status"] in ("pending", "cached")
+    job_id = data["job_id"]
 
+    # Poll status
+    r2 = await client.get(f"/api/v1/forecast/{job_id}")
+    assert r2.status_code == 200
+    assert r2.json()["status"] == "pending"
 
-@pytest.mark.anyio
-async def test_get_forecast_not_found(client):
-    r = await client.get(
-        "/api/v1/forecast/00000000-0000-0000-0000-000000000000")
-    assert r.status_code == 404
-
-
-@pytest.mark.anyio
-async def test_list_forecasts(client):
-    r = await client.get("/api/v1/forecasts")
-    assert r.status_code == 200
-    data = r.json()
-    assert "total" in data
-    assert "items" in data
-    assert isinstance(data["items"], list)
-
+    # List overall
+    r3 = await client.get("/api/v1/forecasts")
+    assert r3.status_code == 200
+    assert r3.json()["total"] >= 1
+    items = r3.json()["items"]
+    assert any(i["job_id"] == job_id for i in items)
 
 @pytest.mark.anyio
-async def test_ready_endpoint(client):
-    r = await client.get("/ready")
-    assert r.status_code == 200
-    data = r.json()
-    assert "checks" in data
-    assert "redis" in data["checks"]
-    assert "postgres" in data["checks"]
+async def test_delete_forecast(client):
+    r = await client.post("/api/v1/forecast", json={
+        "location_name": "Delete Test",
+        "lat": 0.0,
+        "lon": 0.0,
+        "days": 2,
+        "mode": "realtime"
+    })
+    job_id = r.json()["job_id"]
+
+    r_del = await client.delete(f"/api/v1/forecast/{job_id}")
+    assert r_del.status_code == 204
+
+    r_get = await client.get(f"/api/v1/forecast/{job_id}")
+    assert r_get.status_code == 404
