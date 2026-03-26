@@ -1,17 +1,25 @@
-FROM python:3.11-slim
-
+# ── Base Image ───────────────────────────────────────────────
+FROM python:3.11-slim AS base
 WORKDIR /app
-
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev gcc libeccodes0 && \
     rm -rf /var/lib/apt/lists/*
-
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-
 COPY neuralgcm_weather/ ./neuralgcm_weather/
 COPY api/ ./api/
 COPY config.yaml .
-
 ENV JAX_PLATFORMS=cpu
 ENV XLA_PYTHON_CLIENT_PREALLOCATE=false
+
+# ── Dev Target ───────────────────────────────────────────────
+FROM base AS dev
+ENV ENVIRONMENT=development
+ENV DEBUG=true
+CMD ["celery", "-A", "api.worker.celery_app", "worker", "--loglevel=debug", "--concurrency=1"]
+
+# ── Prod Target ──────────────────────────────────────────────
+FROM base AS prod
+ENV ENVIRONMENT=production
+ENV DEBUG=false
+CMD ["celery", "-A", "api.worker.celery_app", "worker", "--loglevel=info", "--concurrency=4"]
