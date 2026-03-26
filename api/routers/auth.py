@@ -1,7 +1,7 @@
 import hashlib
 import uuid
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel
@@ -9,6 +9,7 @@ from typing import Optional
 
 from api.models.database import get_db
 from api.models.api_key import APIKey
+from api.main import limiter
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -30,23 +31,25 @@ class KeyResponse(BaseModel):
 
 @router.post("/keys", response_model=KeyResponse,
              summary="Create a new API key")
+@limiter.limit("10/minute")
 async def create_api_key(
-    request: CreateKeyRequest,
+    request: Request,
+    body: CreateKeyRequest,
     db: AsyncSession = Depends(get_db),
 ):
     raw_key  = APIKey.generate()
     key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
 
     expires_at = None
-    if request.expires_days:
+    if body.expires_days:
         from datetime import timedelta
-        expires_at = datetime.utcnow() + timedelta(days=request.expires_days)
+        expires_at = datetime.utcnow() + timedelta(days=body.expires_days)
 
     api_key = APIKey(
         id=uuid.uuid4(),
         key_hash=key_hash,
-        name=request.name,
-        rate_limit=request.rate_limit,
+        name=body.name,
+        rate_limit=body.rate_limit,
         expires_at=expires_at,
     )
     db.add(api_key)
