@@ -1,8 +1,6 @@
 version: "3.9"
 
 services:
-
-  # ── PostgreSQL + PostGIS ──────────────────────────────────
   postgres:
     image: postgis/postgis:16-3.4
     container_name: neuralgcm_postgres
@@ -21,7 +19,6 @@ services:
       timeout: 5s
       retries: 5
 
-  # ── Redis ─────────────────────────────────────────────────
   redis:
     image: redis:7.2-alpine
     container_name: neuralgcm_redis
@@ -36,11 +33,11 @@ services:
       timeout: 5s
       retries: 5
 
-  # ── FastAPI server ────────────────────────────────────────
   api:
     build:
       context: .
       dockerfile: docker/Dockerfile.api
+      target: prod
     container_name: neuralgcm_api
     environment:
       - ENVIRONMENT=production
@@ -55,8 +52,7 @@ services:
       - CELERY_RESULT_BACKEND=redis://redis:6379/2
       - JAX_PLATFORMS=cpu
       - XLA_PYTHON_CLIENT_PREALLOCATE=false
-    ports:
-      - "8000:8000"
+    # Port 8000 removed — accessed via Nginx only
     depends_on:
       postgres:
         condition: service_healthy
@@ -72,17 +68,25 @@ services:
       timeout: 10s
       retries: 3
 
-  # ── Celery worker ─────────────────────────────────────────
+  # GAP-15 NGINX
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: neuralgcm_nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./forecasts:/app/forecasts:ro
+    depends_on:
+      api:
+        condition: service_healthy
+
   worker:
     build:
       context: .
       dockerfile: docker/Dockerfile.worker
+      target: prod
     container_name: neuralgcm_worker
-    command: >
-      celery -A api.worker.celery_app worker
-      --loglevel=info
-      --concurrency=2
-      --max-tasks-per-child=10
     environment:
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
@@ -103,7 +107,6 @@ services:
       - ./forecasts:/app/forecasts
       - ./logs:/app/logs
 
-  # ── Celery Flower (task monitor) ──────────────────────────
   flower:
     image: mher/flower:2.0
     container_name: neuralgcm_flower
