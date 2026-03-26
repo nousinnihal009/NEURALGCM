@@ -1,38 +1,55 @@
+# Development override — run with:
+#   docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
+#
+# Differences from production:
+#   - API and worker use bind-mounts (live code reload)
+#   - Uvicorn runs with --reload
+#   - No Nginx (dev hits FastAPI directly on :8000)
+#   - DEBUG=true, ENVIRONMENT=development
+
 version: "3.9"
 
-# Development overrides — hot reload, no nginx
-# Usage: docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
-
 services:
+
   api:
     build:
       context: .
       dockerfile: docker/Dockerfile.api
-    environment:
-      - ENVIRONMENT=development
-      - DEBUG=true
+      target: dev
     command: >
       uvicorn api.main:app
       --host 0.0.0.0
       --port 8000
       --reload
-      --reload-dir /app/api
+      --reload-dir api
+      --reload-dir neuralgcm_weather
+      --log-level debug
+    environment:
+      - ENVIRONMENT=development
+      - DEBUG=true
     volumes:
-      - ./api:/app/api
-      - ./neuralgcm_weather:/app/neuralgcm_weather
-      - ./cache:/app/cache
-      - ./forecasts:/app/forecasts
+      # Bind-mount source so --reload picks up edits without rebuild
+      - .:/app
     ports:
       - "8000:8000"
 
   worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.worker
+      target: dev
     command: >
       celery -A api.worker.celery_app worker
       --loglevel=debug
       --concurrency=1
-      --max-tasks-per-child=5
+      --max-tasks-per-child=10
+    environment:
+      - ENVIRONMENT=development
+      - DEBUG=true
     volumes:
-      - ./api:/app/api
-      - ./neuralgcm_weather:/app/neuralgcm_weather
-      - ./cache:/app/cache
-      - ./forecasts:/app/forecasts
+      - .:/app
+
+  # Nginx is intentionally absent in dev — access FastAPI directly.
+  nginx:
+    profiles:
+      - donotstart
