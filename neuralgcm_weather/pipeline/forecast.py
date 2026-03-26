@@ -11,6 +11,7 @@ os.environ["JAX_PLATFORMS"]                 = "cpu"
 os.environ["XLA_FLAGS"]                     = "--xla_cpu_use_thunk_runtime=false"
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
+import xarray as xr
 import numpy as np
 import pandas as pd
 from loguru import logger
@@ -27,7 +28,19 @@ from neuralgcm_weather.output.writer    import save_forecast
 
 
 _ERA5     = None   # module-level singleton (lazy load)
-_REGRIDDER = None  # built once after first ERA5 load
+_REGRIDDER          = None
+_REGRIDDER_GRID_SIG = None   # fingerprint of the grid the regridder was built for
+
+def _grid_signature(ds: xr.Dataset) -> tuple:
+    """
+    Return a hashable tuple identifying the spatial grid of a dataset.
+    Used to detect when the regridder must be rebuilt.
+    """
+    lat_key = "latitude" if "latitude" in ds.coords else "lat"
+    lon_key = "longitude" if "longitude" in ds.coords else "lon"
+    n_lat = ds.sizes.get(lat_key, 0)
+    n_lon = ds.sizes.get(lon_key, 0)
+    return (n_lat, n_lon)
 
 
 def get_era5():
@@ -62,7 +75,7 @@ def run_forecast_pipeline(
         dict with keys: forecast_point, saved_files,
                         elapsed_seconds, violations
     """
-    global _REGRIDDER
+    global _REGRIDDER, _REGRIDDER_GRID_SIG
 
     days = forecast_days or MODEL.forecast_days
     mode = mode or DATA.mode
@@ -114,9 +127,31 @@ def run_forecast_pipeline(
         init_time = pd.Timestamp(init_date_str)
 
     # -- 3. Regrid --
-    if _REGRIDDER is None:
-        _REGRIDDER = build_regridder(init_ds, model)
-    init_state = regrid_init_state(init_ds, _REGRIDDER)
+    from neuralgcm_weather.data.cache import (
+        load_cached_init_state, save_init_state_to_cache)
+
+    # Try cache first
+    init_state = load_cached_init_state(
+        DATA.cache_dir, mode, init_time, MODEL.checkpoint)
+
+    if init_state is None:
+        # Cache miss — regrid and cache result
+        current_sig = _grid_signature(init_ds)
+        if _REGRIDDER is None or current_sig != _REGRIDDER_GRID_SIG:
+            if _REGRIDDER is not None:
+                logger.warning(
+                    f"Grid changed {_REGRIDDER_GRID_SIG} → {current_sig}. "
+                    f"Rebuilding regridder.")
+            _REGRIDDER          = build_regridder(init_ds, model)
+            _REGRIDDER_GRID_SIG = current_sig
+            logger.info(f"Regridder built for grid signature: {current_sig}")
+        
+        init_state = regrid_init_state(init_ds, _REGRIDDER)
+        save_init_state_to_cache(
+            init_state, DATA.cache_dir, mode,
+            init_time, MODEL.checkpoint)
+    else:
+        logger.info("Skipping regrid (loaded from cache)")
 
     # -- 4. Run forecast --
     ds, elapsed = run_forecast(
@@ -141,6 +176,38 @@ def run_forecast_pipeline(
         logger.warning(
             f"{len(violations)} sanity violations detected")
 
+    era5_truth = {}
+    if mode == "historical" and save:
+        try:
+            from neuralgcm_weather.data.era5_loader import (
+                load_era5_point_series, open_era5)
+            _era5 = get_era5()
+            truth_vars = {
+                "temperature_c_850": ("temperature",       850),
+                "z500_m":            ("geopotential",      500),
+                "tpw_mm":            (None,                None),  # skip — derived
+                "mslp_hpa":          ("surface_pressure",  None),
+            }
+            for fp_var, (era5_var, lev) in truth_vars.items():
+                if era5_var is None:
+                    continue
+                raw = load_era5_point_series(
+                    _era5, era5_var, lat, lon,
+                    forecast_dates, level=lev)
+                # Convert ERA5 units to match ForecastPoint units
+                if fp_var == "temperature_c_850":
+                    raw = raw - 273.15
+                elif fp_var == "z500_m":
+                    raw = raw / 9.80665
+                elif fp_var == "mslp_hpa":
+                    raw = raw / 100.0
+                era5_truth[fp_var] = raw
+            logger.info(
+                f"ERA5 truth fetched for overlay: "
+                f"{list(era5_truth.keys())}")
+        except Exception as e:
+            logger.warning(f"ERA5 truth fetch failed (overlay skipped): {e}")
+
     # -- 7. Save --
     saved = {}
     if save:
@@ -150,6 +217,7 @@ def run_forecast_pipeline(
             save_png  = OUTPUT.save_png,
             save_json = OUTPUT.save_json,
             save_csv  = OUTPUT.save_csv,
+            era5_truth = era5_truth,
         )
 
     logger.success(
