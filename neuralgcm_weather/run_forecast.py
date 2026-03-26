@@ -32,9 +32,10 @@ logger.add("./logs/neuralgcm.log",
 def main():
     parser = argparse.ArgumentParser(
         description="NeuralGCM Universal Weather Forecast")
-    parser.add_argument("--lat",      type=float, default=13.0827)
-    parser.add_argument("--lon",      type=float, default=80.2707)
-    parser.add_argument("--name",     type=str,   default="Chennai, India")
+    from neuralgcm_weather.config import LOCATION
+    parser.add_argument("--lat",      type=float, default=LOCATION.lat)
+    parser.add_argument("--lon",      type=float, default=LOCATION.lon)
+    parser.add_argument("--name",     type=str,   default=LOCATION.name)
     parser.add_argument("--days",     type=int,   default=None)
     parser.add_argument("--date",     type=str,   default=None,
                         help="Historical init date YYYY-MM-DD")
@@ -103,21 +104,24 @@ def main():
     print(f"  {'-'*68}")
 
     import numpy as np
+    import pandas as pd
     for i, dt in enumerate(fp.dates):
-        T  = (f"{fp.temperature_c_850[i]:.1f}"
-              if fp.temperature_c_850 is not None else "N/A")
-        RH = (f"{fp.rh_850[i]:.0f}"
-              if fp.rh_850 is not None else "N/A")
-        WS = (f"{fp.wind_speed_850[i]:.1f}"
-              if fp.wind_speed_850 is not None else "N/A")
-        PW = (f"{fp.tpw_mm[i]:.1f}"
-              if fp.tpw_mm is not None else "N/A")
-        Z5 = (f"{fp.z500_m[i]:.0f}"
-              if fp.z500_m is not None else "N/A")
-        SP = (f"{fp.mslp_hpa[i]:.1f}"
-              if fp.mslp_hpa is not None else "N/A")
-        print(f"  {dt.strftime('%a %d %b'):<13} "
-              f"{T:>7} {RH:>6} {WS:>8} {PW:>8} {Z5:>8} {SP:>8}")
+        # Only print once per day (every 4 steps at 6h)
+        if fp.days <= 10 or i % 4 == 0:
+            T  = (f"{fp.temperature_c_850[i]:.1f}"
+                  if fp.temperature_c_850 is not None else "N/A")
+            RH = (f"{fp.rh_850[i]:.0f}"
+                  if fp.rh_850 is not None else "N/A")
+            WS = (f"{fp.wind_speed_850[i]:.1f}"
+                  if fp.wind_speed_850 is not None else "N/A")
+            PW = (f"{fp.tpw_mm[i]:.1f}"
+                  if fp.tpw_mm is not None else "N/A")
+            Z5 = (f"{fp.z500_m[i]:.0f}"
+                  if fp.z500_m is not None else "N/A")
+            SP = (f"{fp.mslp_hpa[i]:.1f}"
+                  if fp.mslp_hpa is not None else "N/A")
+            print(f"  {dt.strftime('%a %d %b'):<13} "
+                  f"{T:>7} {RH:>6} {WS:>8} {PW:>8} {Z5:>8} {SP:>8}")
 
     print(f"{'='*70}")
 
