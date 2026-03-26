@@ -9,7 +9,7 @@ model:
   # Options: deterministic_2_8_deg, deterministic_1_4_deg,
   #          deterministic_0_7_deg, stochastic_1_4_deg
   forecast_days: 5
-  timestep_hours: 24
+  timestep_hours: 6   # NeuralGCM native resolution; use 24 only for daily-summary output
 
 data:
   mode: "realtime"          # "realtime" or "historical"
