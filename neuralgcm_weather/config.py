@@ -32,16 +32,11 @@ class DataConfig:
     ecmwf_lag_hours:int   = _cfg["data"]["ecmwf_lag_hours"]
 
 class LocationConfig:
-    name: str
-    lat:  float
-    lon:  float
-    def __init__(self, name, lat, lon):
-        self.name = name
-        self.lat  = float(lat)
-        self.lon  = float(lon)
-    @property
-    def lon_360(self):
-        return self.lon % 360
+    name: str = _cfg["location"]["name"]
+    lat:  float = float(_cfg["location"]["lat"])
+    lon:  float = float(_cfg["location"]["lon"])
+
+LOCATION = LocationConfig()
 
 class OutputConfig:
     save_dir:  str  = _cfg["output"]["save_dir"]
