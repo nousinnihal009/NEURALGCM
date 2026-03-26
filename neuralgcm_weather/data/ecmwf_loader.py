@@ -30,6 +30,8 @@ ECMWF_VARS = [
     "clwc",   # specific_cloud_liquid_water_content
     "ciwc",   # specific_cloud_ice_water_content
     "w",      # vertical_velocity (optional)
+    "sp",     # surface_pressure
+    "lnsp",   # log_surface_pressure
 ]
 
 ECMWF_TO_ERA5 = {
@@ -122,6 +124,26 @@ def download_ecmwf_analysis(
         )
         logger.success(f"Downloaded: {grib_file} "
                        f"({grib_file.stat().st_size / 1e6:.1f} MB)")
+
+        # Download surface fields (sp, lnsp) — separate call required
+        sfc_file = Path(cache_dir) / f"ecmwf_sfc_{date_str}_{time_str}.grib2"
+        if not sfc_file.exists():
+            try:
+                client.retrieve(
+                    date=date_str,
+                    time=f"{dt.hour:02d}",
+                    step=0,
+                    stream="oper",
+                    type="an",
+                    param=["sp", "lnsp"],
+                    levtype="sfc",
+                    target=str(sfc_file),
+                )
+                logger.success(f"Surface fields downloaded: {sfc_file}")
+            except Exception as e:
+                logger.warning(f"Surface field download failed: {e}")
+                sfc_file = None
+
         return grib_file
 
     except Exception as e:
@@ -154,7 +176,10 @@ def download_ecmwf_analysis(
     return None
 
 
-def grib_to_xarray(grib_file: Path) -> Optional[xr.Dataset]:
+def grib_to_xarray(
+    grib_file: Path,
+    sfc_file: Optional[Path] = None,
+) -> Optional[xr.Dataset]:
     """
     Convert ECMWF GRIB2 file to xarray Dataset matching ERA5 format.
     Handles variable renaming and coordinate standardisation.
@@ -199,6 +224,22 @@ def grib_to_xarray(grib_file: Path) -> Optional[xr.Dataset]:
     except Exception as e:
         logger.warning(f"  Surface read failed: {e}")
 
+    # Read surface file if provided
+    if sfc_file is not None and sfc_file.exists():
+        try:
+            ds_sfc2 = xr.open_dataset(
+                str(sfc_file),
+                engine="cfgrib",
+                backend_kwargs={
+                    "filter_by_keys": {"typeOfLevel": "surface"},
+                    "errors": "ignore",
+                },
+            )
+            datasets.append(ds_sfc2)
+            logger.info(f"  Surface file vars: {list(ds_sfc2.data_vars)}")
+        except Exception as e:
+            logger.warning(f"  Surface file read failed: {e}")
+
     if not datasets:
         logger.error("Could not read any data from GRIB file")
         return None
@@ -242,14 +283,31 @@ def grib_to_xarray(grib_file: Path) -> Optional[xr.Dataset]:
 
     # Add a time coordinate matching ERA5 format
     if "time" not in ds.coords:
-        target_dt = grib_file.stem.split("_")
         try:
-            date_part = target_dt[2] if len(target_dt) > 2 else target_dt[-1]
+            parts = grib_file.stem.split("_")
+            # Expected: ecmwf_pl_YYYYMMDD_HHMMSS or ecmwf_sfc_YYYYMMDD_HHMMSS
+            date_part = next(
+                (p for p in parts if len(p) == 8 and p.isdigit()), None)
+            time_part = next(
+                (p for p in parts if len(p) == 6 and p.isdigit()), None)
+            if date_part is not None:
+                ts_str = date_part
+                if time_part is not None:
+                    hour = int(time_part[:2])
+                    ts_str = f"{date_part[:4]}-{date_part[4:6]}-{date_part[6:8]} {hour:02d}:00"
+                analysis_time = pd.Timestamp(ts_str)
+                logger.info(f"  Parsed analysis time from filename: {analysis_time}")
+            else:
+                # Fallback only if filename is completely unrecognisable
+                analysis_time = get_latest_available_date()
+                logger.warning(
+                    f"Could not parse time from filename '{grib_file.name}'. "
+                    f"Using latest available: {analysis_time}")
+            ds = ds.expand_dims("time").assign_coords(time=[analysis_time])
+        except Exception as e:
+            logger.error(f"Time coordinate assignment failed: {e}")
             ds = ds.expand_dims("time").assign_coords(
-                time=[pd.Timestamp(date_part[:8])])
-        except Exception:
-            ds = ds.expand_dims("time").assign_coords(
-                time=[pd.Timestamp.now().floor("6h")])
+                time=[get_latest_available_date()])
 
     logger.success(
         f"ECMWF dataset ready | "
@@ -278,7 +336,9 @@ def load_realtime_init_state(
         logger.error("ECMWF download failed completely")
         return None
 
-    ds = grib_to_xarray(grib_file)
+    sfc_file = Path(cache_dir) / (
+        grib_file.name.replace("ecmwf_pl_", "ecmwf_sfc_"))
+    ds = grib_to_xarray(grib_file, sfc_file=sfc_file if sfc_file.exists() else None)
     if ds is None:
         logger.error("GRIB conversion failed")
         return None
