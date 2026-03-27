@@ -53,10 +53,12 @@ class NeuralGCMTask(Task):
     bind=True,
     base=NeuralGCMTask,
     name="neuralgcm.run_forecast",
+    max_retries=3,
     autoretry_for=(Exception,),
-    retry_kwargs={'max_retries': 2},
-    retry_backoff=True,
-    retry_jitter=True,
+    retry_backoff=True,          # 1s, 2s, 4s between retries
+    retry_backoff_max=120,       # cap at 2 minutes
+    retry_jitter=True,           # add ±30% jitter to prevent thundering herd
+    dont_autoretry_for=(),       # override per-task below if needed
 )
 def run_forecast_task(
     self,
@@ -178,9 +180,18 @@ def run_forecast_task(
         return output
 
     except Exception as exc:
-        logger.error(f"Task failed | job={job_id} | error={exc}")
-        _update_job_status(job_id, "failed", error=str(exc))
-        raise exc
+        logger.error(
+            f"Task failed | job={job_id} | "
+            f"attempt={self.request.retries + 1}/{self.max_retries + 1} "
+            f"| error={exc}"
+        )
+        # Only mark DB as failed on the final attempt.
+        # autoretry_for will re-raise and retry automatically;
+        # on the last retry Celery raises WorkerLostError or MaxRetriesExceededError
+        # which propagates here with retries == max_retries.
+        if self.request.retries >= self.max_retries:
+            _update_job_status(job_id, "failed", error=str(exc))
+        raise   # always re-raise — autoretry_for takes it from here
 
 
 def _update_job_status(job_id: str, status: str,
