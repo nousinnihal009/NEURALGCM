@@ -1,21 +1,17 @@
 import asyncio
-import os
 from logging.config import fileConfig
 
-from sqlalchemy import pool
+from sqlalchemy import pool, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from alembic import context
 
-# ── Import all ORM models so autogenerate can see them ────────
-# Must be done before Base.metadata is referenced.
 from api.models.database import Base          # noqa: F401
 from api.models.forecast_run import ForecastRun  # noqa: F401
 from api.models.location import Location         # noqa: F401
 from api.models.api_key import APIKey            # noqa: F401
 
-# ── Alembic config object ──────────────────────────────────────
 config = context.config
 
 if config.config_file_name is not None:
@@ -24,23 +20,36 @@ if config.config_file_name is not None:
 target_metadata = Base.metadata
 
 
-def get_url() -> str:
+def _async_url() -> str:
     """
-    Prefer DATABASE_URL env var (Docker Compose sets it).
-    Fall back to alembic.ini sqlalchemy.url.
-    Always return a *sync* psycopg2 URL — Alembic's internal engine
-    is synchronous even when using async_engine_from_config.
+    Returns the asyncpg database URL from Settings.
+    Always uses postgresql+asyncpg:// driver.
     """
     from api.settings import get_settings
-    s = get_settings()
-    return s.database_url_sync
+    return get_settings().database_url          # asyncpg URL
+
+
+def _sync_url() -> str:
+    """
+    Returns a synchronous psycopg2 URL derived from the async URL.
+    Used only for offline mode (no live DB connection).
+    Replaces +asyncpg with +psycopg2 in the driver string.
+    """
+    return _async_url().replace(
+        "postgresql+asyncpg://",
+        "postgresql+psycopg2://",
+        1,
+    )
 
 
 def run_migrations_offline() -> None:
-    """Run migrations in 'offline' mode (no DB connection required)."""
-    url = get_url()
+    """
+    Run migrations without a live DB connection.
+    Alembic emits SQL to stdout / a file instead of executing it.
+    Uses psycopg2 URL — requires psycopg2-binary in environment.
+    """
     context.configure(
-        url=url,
+        url=_sync_url(),
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -63,19 +72,20 @@ def do_run_migrations(connection: Connection) -> None:
 
 
 async def run_async_migrations() -> None:
-    """Run migrations using the async engine (online mode)."""
-    configuration = config.get_section(config.config_ini_section, {})
-    configuration["sqlalchemy.url"] = get_url()
+    """
+    Run migrations against a live DB using the async engine.
+    asyncpg driver — no psycopg2 dependency at runtime.
+    """
+    cfg = config.get_section(config.config_ini_section, {})
+    cfg["sqlalchemy.url"] = _async_url()
 
     connectable = async_engine_from_config(
-        configuration,
+        cfg,
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
-
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)
-
     await connectable.dispose()
 
 
