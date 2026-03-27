@@ -49,16 +49,30 @@ class NeuralGCMTask(Task):
         return self._era5
 
 
+from billiard.exceptions import SoftTimeLimitExceeded
+from celery.exceptions import MaxRetriesExceededError
+
+# Exceptions that must NEVER trigger a retry.
+# These are terminal signals — retrying them causes infinite loops
+# or masks worker shutdown events.
+_NO_RETRY = (
+    MaxRetriesExceededError,   # retries exhausted — stop
+    SoftTimeLimitExceeded,     # task hit time limit — stop
+    SystemExit,                # worker shutting down — stop
+    KeyboardInterrupt,         # worker interrupted — stop
+    MemoryError,               # worker OOM — stop, don't retry
+)
+
 @celery_app.task(
     bind=True,
     base=NeuralGCMTask,
     name="neuralgcm.run_forecast",
     max_retries=3,
     autoretry_for=(Exception,),
-    retry_backoff=True,          # 1s, 2s, 4s between retries
-    retry_backoff_max=120,       # cap at 2 minutes
-    retry_jitter=True,           # add ±30% jitter to prevent thundering herd
-    dont_autoretry_for=(),       # override per-task below if needed
+    dont_autoretry_for=_NO_RETRY,
+    retry_backoff=True,
+    retry_backoff_max=120,
+    retry_jitter=True,
 )
 def run_forecast_task(
     self,
