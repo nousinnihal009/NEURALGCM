@@ -1,25 +1,35 @@
-# ── Base Image ───────────────────────────────────────────────
 FROM python:3.11-slim AS base
+
 WORKDIR /app
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl libpq-dev gcc libeccodes0 && \
+    curl libpq-dev gcc libeccodes-dev apache2-utils && \
     rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
 COPY neuralgcm_weather/ ./neuralgcm_weather/
 COPY api/ ./api/
 COPY config.yaml .
 COPY alembic/ ./alembic/
 COPY alembic.ini .
 
-# ── Dev Target ───────────────────────────────────────────────
-FROM base AS dev
-ENV ENVIRONMENT=development
-ENV DEBUG=true
-CMD ["sh", "-c", "alembic upgrade head && uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload --workers 1"]
+ENV JAX_PLATFORMS=cpu
+ENV XLA_PYTHON_CLIENT_PREALLOCATE=false
 
-# ── Prod Target ──────────────────────────────────────────────
-FROM base AS prod
-ENV ENVIRONMENT=production
-ENV DEBUG=false
-CMD ["sh", "-c", "alembic upgrade head && uvicorn api.main:app --host 0.0.0.0 --port 8000 --workers 4"]
+
+FROM base AS production
+CMD ["sh", "-c", \
+     "alembic upgrade head && \
+      uvicorn api.main:app --host 0.0.0.0 --port 8000 --workers 2"]
+
+
+FROM base AS dev
+CMD ["uvicorn", "api.main:app", \
+     "--host", "0.0.0.0", \
+     "--port", "8000", \
+     "--reload", \
+     "--reload-dir", "api", \
+     "--reload-dir", "neuralgcm_weather", \
+     "--log-level", "debug"]
