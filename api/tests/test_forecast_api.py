@@ -77,3 +77,58 @@ async def test_delete_forecast(client):
 
     r_get = await client.get(f"/api/v1/forecast/{job_id}")
     assert r_get.status_code == 404
+
+@pytest.mark.anyio
+async def test_location_geom_stored_as_wkt(client, db_session):
+    """
+    Verify that _point_geom() stores a string representation that
+    round-trips through the column without data loss.
+    In SQLite tests the geom column is String(255); we check that
+    the stored value contains the coordinate pair, not a Python repr.
+    """
+    from api.models.location import Location
+    from sqlalchemy import select, text
+
+    create = await client.post("/api/v1/locations", json={
+        "name": "Geom Test Location",
+        "lat": 13.0827,
+        "lon": 80.2707,
+    })
+    assert create.status_code == 201
+    loc_id = create.json()["id"]
+
+    # Fetch directly from DB to inspect the raw geom value
+    # Avoid calling UUID() on loc_id if UUID import not at top:
+    result = await db_session.execute(
+        select(Location).where(Location.id == loc_id)
+    )
+    loc = result.scalar_one_or_none()
+    assert loc is not None, "Location not found in DB after creation"
+
+    geom_val = loc.geom
+    assert geom_val is not None, (
+        "geom column is NULL — _point_geom() did not write a value")
+
+    geom_str = str(geom_val)
+    assert "80.2707" in geom_str, (
+        f"Longitude 80.2707 not found in stored geom value: {geom_str!r}\n"
+        "This indicates WKTElement.__repr__ was stored instead of WKT.")
+    assert "13.0827" in geom_str, (
+        f"Latitude 13.0827 not found in stored geom value: {geom_str!r}")
+    assert "<" not in geom_str, (
+        f"Python object repr leaked into geom column: {geom_str!r}\n"
+        "SQLAlchemy called str(WKTElement) instead of using the WKT.")
+
+
+@pytest.mark.anyio
+async def test_point_geom_rejects_nan():
+    """_point_geom() must raise ValueError for NaN coordinates."""
+    from api.routers.forecast import _point_geom
+    import math
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError, match="NaN"):
+        _point_geom(math.nan, 13.0)
+
+    with _pytest.raises(ValueError, match="NaN"):
+        _point_geom(80.0, math.nan)
