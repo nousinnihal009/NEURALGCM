@@ -2,6 +2,7 @@ import { useCallback, useRef, useState } from "react";
 import Map, {
   Marker, NavigationControl, ScaleControl,
   type MapRef, type MapLayerMouseEvent
+// @ts-ignore: react-map-gl types are broken under bundler resolution
 } from "react-map-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 import { useForecastStore } from "../../store/forecastStore";
