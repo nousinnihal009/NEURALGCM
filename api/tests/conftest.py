@@ -30,20 +30,15 @@ from sqlalchemy.pool import StaticPool
 
 import api.cache.redis_client as _rc
 
-_mock_store: dict = {}
-_mock_redis = AsyncMock()
-_mock_redis.ping   = AsyncMock(return_value=True)
-_mock_redis.aclose = AsyncMock(return_value=None)
-_mock_redis.get    = AsyncMock(side_effect=lambda k: _mock_store.get(k))
-_mock_redis.setex  = AsyncMock(
-    side_effect=lambda k, ttl, v: _mock_store.update({k: v}) or True)
-_mock_redis.delete = AsyncMock(
-    side_effect=lambda k: bool(_mock_store.pop(k, None)))
-_mock_redis.dbsize = AsyncMock(side_effect=lambda: len(_mock_store))
-_mock_redis.info   = AsyncMock(return_value={"used_memory": 0})
-
-# Inject mock into the module global BEFORE app import
-_rc._redis = _mock_redis
+# _mock_redis is built fresh per-module via the fixture below.
+# We still need to set _rc._redis to SOMETHING before the app
+# imports (to prevent lifespan from connecting to real Redis).
+# Inject a sentinel AsyncMock at import time; the per-module
+# fixture will replace it with a properly wired instance.
+_sentinel_redis = AsyncMock()
+_sentinel_redis.ping   = AsyncMock(return_value=True)
+_sentinel_redis.aclose = AsyncMock(return_value=None)
+_rc._redis = _sentinel_redis
 
 
 # ── NOW safe to import the app ────────────────────────────────
@@ -94,6 +89,31 @@ _TEST_METADATA = _build_test_metadata()
 def anyio_backend():
     return "asyncio"
 
+@pytest.fixture(scope="module", autouse=True)
+def fresh_redis_mock():
+    """
+    Build a fresh in-memory store and Redis mock for each test module.
+    Injected into _rc._redis so all get_redis() calls return it.
+    The store is scoped to this module — no cross-module leakage.
+    autouse=True means every test module gets this automatically.
+    """
+    store: dict = {}
+    mock = AsyncMock()
+    mock.ping   = AsyncMock(return_value=True)
+    mock.aclose = AsyncMock(return_value=None)
+    mock.get    = AsyncMock(side_effect=lambda k: store.get(k))
+    mock.setex  = AsyncMock(
+        side_effect=lambda k, ttl, v: store.update({k: v}) or True)
+    mock.delete = AsyncMock(
+        side_effect=lambda k: bool(store.pop(k, None)))
+    mock.dbsize = AsyncMock(side_effect=lambda: len(store))
+    mock.info   = AsyncMock(return_value={"used_memory": 0})
+
+    _rc._redis = mock      # inject before any test in this module runs
+    yield mock
+    store.clear()          # clean up after the module finishes
+    _rc._redis = _sentinel_redis  # restore sentinel for next module
+
 
 @pytest_asyncio.fixture(scope="module")
 async def db_engine():
@@ -143,5 +163,3 @@ async def client(db_engine):
         yield c
 
     app.dependency_overrides.clear()
-    # Reset mock store between test modules
-    _mock_store.clear()
