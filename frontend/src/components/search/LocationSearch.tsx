@@ -11,7 +11,7 @@ export function LocationSearch() {
   >([]);
   const [open, setOpen]       = useState(false);
   const [loading, setLoading] = useState(false);
-  const debounceRef           = useRef<ReturnType<typeof setTimeout>>();
+  const debounceRef           = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const { triggerForecast }  = useForecast();
   const { setMapView }       = useForecastStore();
