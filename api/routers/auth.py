@@ -9,7 +9,7 @@ from typing import Optional
 
 from api.models.database import get_db
 from api.models.api_key import APIKey
-from api.main import limiter
+from api.rate_limit import limiter
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
