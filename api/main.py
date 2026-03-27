@@ -12,9 +12,9 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
+from api.rate_limit import limiter
 from loguru import logger
 
 from api.settings import get_settings
@@ -24,13 +24,6 @@ from api.middleware.logging import RequestLoggingMiddleware
 from api.routers import forecast, health, auth, locations
 
 settings = get_settings()
-
-# ── Rate limiter (shared instance, imported by routers) ───────
-limiter = Limiter(
-    key_func=get_remote_address,
-    default_limits=[settings.api_rate_limit],
-)
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -114,8 +107,11 @@ app.include_router(auth.router, prefix=settings.api_prefix)
 # ── Static files ──────────────────────────────────────────────
 import pathlib
 pathlib.Path("./forecasts").mkdir(exist_ok=True)
-app.mount("/static/forecasts", StaticFiles(directory="./forecasts"),
-          name="forecasts")
+app.mount(
+    "/static/forecasts",
+    StaticFiles(directory="./forecasts"),
+    name="forecasts",
+)
 
 # ── Root redirect ─────────────────────────────────────────────
 @app.get("/", include_in_schema=False)
