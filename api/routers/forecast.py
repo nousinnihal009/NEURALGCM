@@ -31,9 +31,44 @@ from api.rate_limit import limiter
 settings = get_settings()
 router   = APIRouter(prefix="/forecast", tags=["Forecasts"])
 
+import math as _math
+
 def _point_geom(lon: float, lat: float):
-    """WKT POINT geometry for PostGIS. Lon before lat per OGC."""
-    return WKTElement(f"POINT({lon} {lat})", srid=4326)
+    """
+    Build a PostGIS-compatible geometry value for a lat/lon point.
+
+    Returns WKTElement when connected to Postgres (production).
+    Returns a plain WKT string when connected to SQLite (tests) so
+    SQLAlchemy can bind it to a String column without mangling it.
+
+    The caller (ForecastRun constructor) does not need to change —
+    both return types are valid for their respective column types.
+    """
+    if _math.isnan(lon) or _math.isnan(lat):
+        raise ValueError(
+            f"Cannot build geometry for NaN coordinates: "
+            f"lon={lon}, lat={lat}")
+
+    wkt = f"POINT({lon} {lat})"
+
+    # Detect the active dialect. The column type in the ORM model
+    # is Geometry on Postgres and String on SQLite (test override).
+    # Import lazily to avoid a hard dependency at module load time.
+    try:
+        from geoalchemy2.elements import WKTElement
+        from sqlalchemy import inspect as sa_inspect
+        from api.models.database import engine
+
+        # Use sync_engine directly since it exposes the dialect synchronously
+        dialect = getattr(engine, "sync_engine", engine).dialect.name
+        if dialect == "postgresql":
+            return WKTElement(wkt, srid=4326)
+        # SQLite path — return plain WKT string stored as TEXT
+        return wkt
+    except Exception:
+        # Fallback: return plain string if engine is not yet
+        # initialised (e.g. during import-time module scanning).
+        return wkt
 
 
 @router.post(
