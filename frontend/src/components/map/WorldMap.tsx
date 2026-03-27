@@ -1,9 +1,8 @@
 import { useCallback, useRef, useState } from "react";
 import Map, {
   Marker, NavigationControl, ScaleControl,
-  type MapRef, type MapLayerMouseEvent
-// @ts-ignore: react-map-gl types are broken under bundler resolution
-} from "react-map-gl";
+  type MapRef, type MapMouseEvent
+} from "react-map-gl/mapbox";
 import "mapbox-gl/dist/mapbox-gl.css";
 import { useForecastStore } from "../../store/forecastStore";
 import { useForecast } from "../../hooks/useForecast";
@@ -24,7 +23,7 @@ export function WorldMap() {
   const [cursor, setCursor] = useState("crosshair");
 
   const handleClick = useCallback(
-    async (e: MapLayerMouseEvent) => {
+    async (e: MapMouseEvent) => {
       if (isPolling) return;
       const { lat, lng } = e.lngLat;
       await triggerForecast({
