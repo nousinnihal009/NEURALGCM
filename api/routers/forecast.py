@@ -25,11 +25,15 @@ from api.cache.redis_client import (
     build_cache_key, get_cached_forecast, set_cached_forecast)
 from api.dependencies import get_current_api_key
 from api.settings import get_settings
-from api.main import limiter
+from api.rate_limit import limiter
 
 
 settings = get_settings()
 router   = APIRouter(prefix="/forecast", tags=["Forecasts"])
+
+def _point_geom(lon: float, lat: float):
+    """WKT POINT geometry for PostGIS. Lon before lat per OGC."""
+    return WKTElement(f"POINT({lon} {lat})", srid=4326)
 
 
 @router.post(
@@ -84,6 +88,7 @@ async def submit_forecast(
             id=uuid.UUID(job_id),
             location_name=body.location_name,
             lat=body.lat, lon=body.lon,
+            geom=_point_geom(body.lon, body.lat),
             geom=WKTElement(f"POINT({body.lon} {body.lat})", srid=4326),
             forecast_days=body.days,
             init_date=body.init_date,
@@ -113,7 +118,7 @@ async def submit_forecast(
         id=uuid.UUID(job_id),
         location_name=body.location_name,
         lat=body.lat, lon=body.lon,
-        geom=WKTElement(f"POINT({body.lon} {body.lat})", srid=4326),
+        geom=_point_geom(body.lon, body.lat),
         forecast_days=body.days,
         init_date=body.init_date,
         mode=ForecastMode(body.mode.value),
