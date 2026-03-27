@@ -1,70 +1,147 @@
 """
-CI-safe pytest fixtures for API testing.
-Uses aiosqlite in-memory database instead of PostgreSQL.
-Mocks Redis completely to remove dependencies.
+Pytest fixtures — CI-safe, zero external dependencies.
+=======================================================
+· SQLite in-memory via aiosqlite (no Postgres needed)
+· Geometry columns replaced with String for SQLite compatibility
+  using a COPY of metadata — Base.metadata is never mutated.
+· Redis mocked via direct module-level patch of redis_client._redis
+  BEFORE the FastAPI app is imported, so the global is already set
+  when lifespan runs.
+· All overrides are scoped to the module and torn down after.
 """
 
+import asyncio
 import pytest
 import pytest_asyncio
-import asyncio
-from httpx import AsyncClient, ASGITransport
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
-from unittest.mock import AsyncMock, patch
+from typing import AsyncGenerator
+from unittest.mock import AsyncMock
 
-from api.models.database import Base, get_db
-from api.settings import Settings
+from sqlalchemy import Column, String, Table, MetaData
+from sqlalchemy.ext.asyncio import (
+    create_async_engine, async_sessionmaker, AsyncSession)
+from sqlalchemy.pool import StaticPool
 
-def get_test_settings():
-    return Settings(
-        environment="development",
-        debug=True,
-        postgres_host="localhost",
-        postgres_port=5432,
-        postgres_db="neuralgcm_weather_test",
-        redis_host="localhost",
-        redis_port=6379,
-    )
 
-@pytest.fixture(scope="session")
-def event_loop():
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
+# ── Patch Redis BEFORE importing the FastAPI app ──────────────
+# redis_client stores the connection in a module-level _redis global.
+# If the app is imported first, lifespan calls get_redis() which
+# populates _redis with a live connection that ignores overrides.
+# Patching the global directly before any import is the only safe fix.
 
-@pytest.fixture(scope="session")
+import api.cache.redis_client as _rc
+
+_mock_store: dict = {}
+_mock_redis = AsyncMock()
+_mock_redis.ping   = AsyncMock(return_value=True)
+_mock_redis.aclose = AsyncMock(return_value=None)
+_mock_redis.get    = AsyncMock(side_effect=lambda k: _mock_store.get(k))
+_mock_redis.setex  = AsyncMock(
+    side_effect=lambda k, ttl, v: _mock_store.update({k: v}) or True)
+_mock_redis.delete = AsyncMock(
+    side_effect=lambda k: bool(_mock_store.pop(k, None)))
+_mock_redis.dbsize = AsyncMock(side_effect=lambda: len(_mock_store))
+_mock_redis.info   = AsyncMock(return_value={"used_memory": 0})
+
+# Inject mock into the module global BEFORE app import
+_rc._redis = _mock_redis
+
+
+# ── NOW safe to import the app ────────────────────────────────
+from api.models.database import Base, get_db   # noqa: E402
+from api.cache.redis_client import get_redis    # noqa: E402
+
+
+# ── Build a COPY of Base.metadata with Geometry → String ─────
+# Never touch Base.metadata directly — it is a module-level singleton
+# and mutations persist for the entire Python process.
+
+def _build_test_metadata() -> MetaData:
+    """
+    Return a new MetaData object that mirrors Base.metadata but with
+    all GeoAlchemy2 Geometry columns replaced by String(255).
+    This copy is used only for in-memory SQLite table creation.
+    """
+    from geoalchemy2 import Geometry
+
+    src = Base.metadata
+    dst = MetaData()
+
+    for src_table in src.tables.values():
+        cols = []
+        for col in src_table.columns:
+            if isinstance(col.type, Geometry):
+                new_col = Column(
+                    col.name,
+                    String(255),
+                    nullable=col.nullable,
+                    index=col.index,
+                )
+            else:
+                new_col = col.copy()
+            cols.append(new_col)
+
+        Table(src_table.name, dst, *cols, extend_existing=True)
+
+    return dst
+
+
+_TEST_METADATA = _build_test_metadata()
+
+
+# ── Fixtures ──────────────────────────────────────────────────
+
+@pytest.fixture(scope="module")
 def anyio_backend():
     return "asyncio"
 
+
 @pytest_asyncio.fixture(scope="module")
-async def client():
-    mock_redis = AsyncMock()
-    mock_redis.ping = AsyncMock(return_value=True)
-    mock_redis.get = AsyncMock(return_value=None)
-    mock_redis.setex = AsyncMock(return_value=True)
+async def db_engine():
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    async with engine.begin() as conn:
+        await conn.run_sync(_TEST_METADATA.create_all)
+    yield engine
+    await engine.dispose()
 
-    with patch("api.cache.redis_client.get_redis", return_value=mock_redis):
-        # Setup in-memory SQLite instead of asyncpg for testing
-        engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
-        TestingSessionLocal = async_sessionmaker(
-            engine, expire_on_commit=False, autoflush=False)
 
-        from api.main import app
+@pytest_asyncio.fixture(scope="function")
+async def db_session(db_engine) -> AsyncGenerator[AsyncSession, None]:
+    Session = async_sessionmaker(
+        db_engine, class_=AsyncSession, expire_on_commit=False)
+    async with Session() as session:
+        yield session
+        await session.rollback()
 
-        async def override_get_db():
-            async with TestingSessionLocal() as session:
-                yield session
 
-        app.dependency_overrides[get_db] = override_get_db
+@pytest_asyncio.fixture(scope="module")
+async def client(db_engine):
+    """
+    Async test client with DB and Redis overrides.
+    Redis is already patched at module level above.
+    Only DB needs dependency_overrides.
+    """
+    from api.main import app
 
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+    Session = async_sessionmaker(
+        db_engine, class_=AsyncSession, expire_on_commit=False)
 
-        async with AsyncClient(
-            transport=ASGITransport(app=app),
-            base_url="http://test"
-        ) as c:
-            yield c
+    async def override_get_db():
+        async with Session() as session:
+            yield session
 
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.drop_all)
-        await engine.dispose()
+    app.dependency_overrides[get_db] = override_get_db
+
+    from httpx import AsyncClient, ASGITransport
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as c:
+        yield c
+
+    app.dependency_overrides.clear()
+    # Reset mock store between test modules
+    _mock_store.clear()
