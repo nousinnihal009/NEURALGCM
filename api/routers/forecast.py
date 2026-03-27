@@ -89,7 +89,6 @@ async def submit_forecast(
             location_name=body.location_name,
             lat=body.lat, lon=body.lon,
             geom=_point_geom(body.lon, body.lat),
-            geom=WKTElement(f"POINT({body.lon} {body.lat})", srid=4326),
             forecast_days=body.days,
             init_date=body.init_date,
             mode=ForecastMode(body.mode.value),
