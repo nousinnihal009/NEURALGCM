@@ -1,0 +1,52 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg-primary:   #0d1117;
+  --bg-secondary: #161b22;
+  --bg-tertiary:  #21262d;
+  --border:       #30363d;
+  --accent-blue:  #58A6FF;
+  --accent-green: #3FB950;
+  --accent-orange:#F78166;
+  --accent-yellow:#EF9F27;
+  --accent-purple:#BD8EE6;
+  --text-primary: #e6edf3;
+  --text-secondary:#8B949E;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body, #root {
+  height: 100%;
+  width: 100%;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: "Inter", system-ui, sans-serif;
+  overflow: hidden;
+}
+
+/* Recharts custom dark theme */
+.recharts-cartesian-grid-horizontal line,
+.recharts-cartesian-grid-vertical line {
+  stroke: #30363d;
+  stroke-opacity: 0.6;
+}
+.recharts-text { fill: #8B949E; font-size: 11px; }
+.recharts-legend-item-text { color: #8B949E !important; }
+.recharts-tooltip-wrapper { outline: none; }
+
+/* Custom scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: var(--bg-primary); }
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--text-secondary); }
+
+/* Mapbox overrides */
+.mapboxgl-ctrl-group { background: var(--bg-secondary) !important; }
+.mapboxgl-ctrl-group button { color: var(--text-primary) !important; }
