@@ -1,0 +1,34 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Evaluation Pipeline Configuration
+# ──────────────────────────────────────────────────────────────────────────────
+# Copy this file and adjust paths / parameters for your run.
+
+# Required: paths to input data
+era5_path: "data/era5_june2020.grib"
+forecast_path: "data/forecast_june2020.nc"
+forecast_format: "netcdf"          # netcdf | grib | zarr
+
+# Output directory (will be created if absent)
+output_dir: "./eval_output"
+
+# Variables to evaluate (null = auto-detect shared variables)
+variables: null
+# variables:
+#   - temperature_2m
+#   - u_wind_10m
+#   - v_wind_10m
+
+# Spatial bounding box (optional — omit to use full domain)
+# bbox:
+#   lat_min: 12.5
+#   lat_max: 13.5
+#   lon_min: 80.0
+#   lon_max: 80.5
+
+# Time range (optional — omit to use full overlap)
+# time_range:
+#   start: "2020-06-25"
+#   end: "2020-06-30"
+
+# Snapshot time indices for side-by-side plots
+snapshot_indices: [0, 24, 72]
