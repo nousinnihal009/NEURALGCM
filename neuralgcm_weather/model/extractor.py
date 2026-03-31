@@ -83,9 +83,9 @@ class VariableExtractor:
     from a NeuralGCM forecast xarray Dataset.
     """
 
-    def __init__(self, ds: xr.Dataset, forecast_days: int):
+    def __init__(self, ds: xr.Dataset, n_steps: int):
         self.ds = ds
-        self.n  = forecast_days + 1
+        self.n  = n_steps
         self._detect_dims()
         logger.info(
             f"Extractor ready | "
