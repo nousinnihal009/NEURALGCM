@@ -85,11 +85,17 @@ def run_forecast(
     # Encode initial state
     state = model.encode(inputs, forcings, rng_key)
 
-    # CORRECT unroll call — no expand_dims, no steps+1
+    # For unroll, temporal forcings must have a time dimension.
+    temporal_forcings = {k: jnp.expand_dims(jnp.asarray(v), 0) for k, v in forcings.items()}
+
+    # Calculate correct number of integration steps
+    steps = int((forecast_days * 24) / timestep_hours)
+    n_steps = steps + 1
+
     _, preds = model.unroll(
         state,
-        forcings,
-        steps     = forecast_days,
+        temporal_forcings,
+        steps     = n_steps,
         timedelta = np.timedelta64(timestep_hours, "h"),
         start_with_input = True,
     )
@@ -98,7 +104,6 @@ def run_forecast(
     logger.info(f"Unroll complete in {elapsed:.1f}s")
 
     # Convert to xarray — handle all preds container types
-    n_steps = forecast_days + 1
     times_td = pd.to_timedelta(
         np.arange(n_steps) * timestep_hours, "h")
 
