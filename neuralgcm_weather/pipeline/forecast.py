@@ -162,11 +162,13 @@ def run_forecast_pipeline(
     )
 
     # -- 5. Extract variables --
+    steps = int((days * 24) / MODEL.timestep_hours)
+    n_steps = steps + 1
     forecast_dates = [
-        init_time + pd.Timedelta(days=d)
-        for d in range(days + 1)
+        init_time + pd.Timedelta(hours=i * MODEL.timestep_hours)
+        for i in range(n_steps)
     ]
-    extractor = VariableExtractor(ds, days)
+    extractor = VariableExtractor(ds, n_steps=n_steps)
     fp = extractor.extract_all(
         location_name, lat, lon, forecast_dates)
 
