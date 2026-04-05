@@ -47,7 +47,10 @@ export async function reverseGeocode(
       "https://nominatim.openstreetmap.org/reverse",
       {
         params: { lat, lon, format: "json" },
-        headers: { "Accept-Language": "en" },
+        headers: {
+          "Accept-Language": "en",
+          "User-Agent": "NeuralGCM-Weather/2.0"
+        },
       }
     );
     const a = data.address;
@@ -69,7 +72,10 @@ export async function forwardGeocode(
       "https://nominatim.openstreetmap.org/search",
       {
         params: { q: query, format: "json", limit: 5 },
-        headers: { "Accept-Language": "en" },
+        headers: {
+          "Accept-Language": "en",
+          "User-Agent": "NeuralGCM-Weather/2.0"
+        },
       }
     );
     return data.map((r: any) => ({
