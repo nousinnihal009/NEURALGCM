@@ -219,7 +219,7 @@ async def get_forecast(
     # Build response
     base = {
         "job_id":           str(run.id),
-        "status":           run.status.value,
+        "status":           run.status,
         "location_name":    run.location_name,
         "lat":              run.lat,
         "lon":              run.lon,
@@ -230,10 +230,10 @@ async def get_forecast(
         "paper_reference":  "Kochkov et al. 2024 (arXiv:2311.07222v3)",
     }
 
-    if run.status in (ForecastStatus.PENDING, ForecastStatus.RUNNING):
+    if run.status in ("pending", "running"):
         return ForecastResultResponse(**base, daily=[])
 
-    if run.status == ForecastStatus.FAILED:
+    if run.status == "failed":
         return ForecastResultResponse(**base, daily=[], error=run.error_msg)
 
     if run.result:
@@ -305,7 +305,7 @@ async def delete_forecast(
     if not run:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
 
-    if run.status == ForecastStatus.RUNNING and not force:
+    if run.status == "running" and not force:
         raise HTTPException(
             status_code=409,
             detail=(
@@ -315,7 +315,7 @@ async def delete_forecast(
                 "Celery task will complete or fail independently)."))
 
     # Revoke Celery task if still pending
-    if run.status == ForecastStatus.PENDING and run.celery_id:
+    if run.status == "pending" and run.celery_id:
         try:
             from api.worker.celery_app import celery_app
             celery_app.control.revoke(run.celery_id, terminate=False)
@@ -325,7 +325,7 @@ async def delete_forecast(
 
     await db.delete(run)
     await db.commit()
-    logger.info(f"Forecast job {job_id} deleted (status was {run.status.value})")
+    logger.info(f"Forecast job {job_id} deleted (status was {run.status})")
     # 204 No Content — FastAPI returns empty body automatically
 
 
@@ -346,13 +346,13 @@ async def list_forecasts(
     query = select(ForecastRun).order_by(desc(ForecastRun.created_at))
 
     if status:
-        query = query.where(ForecastRun.status == ForecastStatus(status))
+        query = query.where(ForecastRun.status == status)
 
     # Count total
     count_query = select(func.count(ForecastRun.id))
     if status:
         count_query = count_query.where(
-            ForecastRun.status == ForecastStatus(status))
+            ForecastRun.status == status)
     count_result = await db.execute(count_query)
     total = count_result.scalar() or 0
 
@@ -363,7 +363,7 @@ async def list_forecasts(
     items = []
     for run in runs:
         items.append(ForecastResultResponse(
-            job_id=str(run.id), status=run.status.value,
+            job_id=str(run.id), status=run.status,
             location_name=run.location_name, lat=run.lat, lon=run.lon,
             forecast_days=run.forecast_days, is_cached=run.is_cached or False,
             created_at=run.created_at.isoformat() + "Z",
