@@ -108,9 +108,11 @@ export function useForecast() {
       }
     } catch (e: any) {
       toast.dismiss(toastId);
-      toast.error(
-        `Failed to queue forecast: ${e.response?.data?.detail || e.message}`
-      );
+      const detail = e.response?.data?.detail;
+      const msg = Array.isArray(detail)
+        ? detail.map((d: any) => d.msg || d.message || JSON.stringify(d)).join("; ")
+        : (typeof detail === "string" ? detail : e.message);
+      toast.error(`Failed to queue forecast: ${msg}`);
     }
   }, [forecastDays, forecastMode, startPolling, setCurrentForecast, setCurrentJobId, setSelectedLocation, addToHistory, setPollProgress]);
 
