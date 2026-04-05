@@ -1,7 +1,9 @@
 import axios from "axios";
 
 export const apiClient = axios.create({
-  baseURL: import.meta.env.VITE_API_URL || "http://localhost:8000",
+  // In dev, Vite proxy forwards /api/* and /health to localhost:8000
+  // No baseURL needed — avoids CORS preflight issues
+  baseURL: "",
   timeout: 30_000,
   headers: { "Content-Type": "application/json" },
 });
