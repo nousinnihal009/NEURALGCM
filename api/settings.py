@@ -18,6 +18,7 @@ class Settings(BaseSettings):
 
     # API
     api_prefix: str = "/api/v1"
+    standalone: bool = False  # True = SQLite + in-memory cache, no Redis/Celery
     allowed_origins: list[str] = ["http://localhost:3000", "http://localhost:8080"]
     api_rate_limit: str = "60/minute"
     api_key_header: str = "X-API-Key"
@@ -32,6 +33,8 @@ class Settings(BaseSettings):
 
     @property
     def database_url(self) -> str:
+        if self.standalone:
+            return "sqlite+aiosqlite:///./neuralgcm_dev.db"
         return (f"postgresql+asyncpg://{self.postgres_user}:"
                 f"{self.postgres_password}@{self.postgres_host}:"
                 f"{self.postgres_port}/{self.postgres_db}")
