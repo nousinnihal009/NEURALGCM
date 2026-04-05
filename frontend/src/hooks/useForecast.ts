@@ -8,7 +8,7 @@ import { useForecastStore } from "../store/forecastStore";
 import type { MapLocation } from "../api/types";
 
 const POLL_INTERVAL_MS = 3000;
-const MAX_POLL_MS      = 120_000;
+const MAX_POLL_MS      = 300_000;
 
 export function useForecast() {
   const {
