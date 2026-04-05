@@ -1,6 +1,10 @@
 """
 NeuralGCM Weather API — FastAPI Application
 ============================================
+Supports two modes:
+  - Production:  PostgreSQL + Redis + Celery (via Docker)
+  - Standalone:  SQLite + in-memory cache, no external deps
+                 Set STANDALONE=true in .env
 """
 
 import os
@@ -12,31 +16,40 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
-from slowapi import _rate_limit_exceeded_handler
-from slowapi.errors import RateLimitExceeded
-from api.rate_limit import limiter
 from loguru import logger
 
 from api.settings import get_settings
 from api.models.database import engine, Base
-from api.cache.redis_client import get_redis, close_redis
+from api.rate_limit import limiter, HAS_SLOWAPI
 from api.middleware.logging import RequestLoggingMiddleware
 from api.routers import forecast, health, auth, locations
 
 settings = get_settings()
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info(f"Starting {settings.app_name} v{settings.app_version}")
+    logger.info(f"Mode: {'STANDALONE (SQLite)' if settings.standalone else 'PRODUCTION (PostgreSQL)'}")
 
+    # Create DB tables
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     logger.info("Database tables verified/created")
 
-    r = await get_redis()
-    await r.ping()
-    logger.info("Redis connection established")
+    # Redis — only in production mode
+    if not settings.standalone:
+        try:
+            from api.cache.redis_client import get_redis
+            r = await get_redis()
+            await r.ping()
+            logger.info("Redis connection established")
+        except Exception as e:
+            logger.warning(f"Redis connection failed: {e}")
+    else:
+        logger.info("Standalone mode — Redis skipped (using in-memory cache)")
 
+    # NeuralGCM checkpoint pre-load (optional)
     try:
         from neuralgcm_weather.model.checkpoint import load_checkpoint
         load_checkpoint(
@@ -49,7 +62,13 @@ async def lifespan(app: FastAPI):
     logger.info(f"API ready at {settings.api_prefix}")
     yield
 
-    await close_redis()
+    # Cleanup
+    if not settings.standalone:
+        try:
+            from api.cache.redis_client import close_redis
+            await close_redis()
+        except Exception:
+            pass
     await engine.dispose()
     logger.info("Shutdown complete")
 
@@ -82,9 +101,12 @@ by Google Research (Kochkov et al., 2024).
     lifespan=lifespan,
 )
 
-# ── Attach limiter to app state (slowapi requirement) ─────────
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+# ── Rate limiter (only when slowapi is available) ─────────
+if HAS_SLOWAPI:
+    from slowapi import _rate_limit_exceeded_handler
+    from slowapi.errors import RateLimitExceeded
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # ── CORS ──────────────────────────────────────────────────────
 app.add_middleware(
@@ -122,4 +144,5 @@ async def root():
         "docs":    f"{settings.api_prefix}/docs",
         "health":  "/health",
         "ready":   "/ready",
+        "mode":    "standalone" if settings.standalone else "production",
     })
