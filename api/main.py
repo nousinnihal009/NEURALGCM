@@ -86,6 +86,18 @@ by Google Research (Kochkov et al., 2024).
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+# ── Debug: return traceback in 500 responses (dev only) ───────
+if settings.debug:
+    import traceback as _tb
+
+    @app.exception_handler(Exception)
+    async def _debug_exception_handler(request: Request, exc: Exception):
+        tb = _tb.format_exception(type(exc), exc, exc.__traceback__)
+        return JSONResponse(
+            status_code=500,
+            content={"detail": str(exc), "traceback": "".join(tb)},
+        )
+
 # ── CORS ──────────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
