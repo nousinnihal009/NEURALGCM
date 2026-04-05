@@ -40,13 +40,13 @@ class ForecastRun(Base):
     forecast_days = Column(Integer, nullable=False, default=5)
     init_date     = Column(String(50), nullable=True)
     mode          = Column(
-        Enum(ForecastMode, name="forecastmode"),
-        nullable=False, default=ForecastMode.REALTIME)
+        String(20),
+        nullable=False, default="realtime")
 
     # Status
     status     = Column(
-        Enum(ForecastStatus, name="forecaststatus"),
-        nullable=False, default=ForecastStatus.PENDING, index=True)
+        String(20),
+        nullable=False, default="pending", index=True)
     error_msg  = Column(Text, nullable=True)
     is_cached  = Column(Boolean, default=False)
     cache_key  = Column(String(255), nullable=True, index=True)
