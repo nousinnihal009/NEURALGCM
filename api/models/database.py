@@ -5,24 +5,13 @@ from api.settings import get_settings
 
 settings = get_settings()
 
-_engine_kwargs: dict = {}
-
-if settings.standalone:
-    # SQLite — no pooling options, need check_same_thread for async
-    _engine_kwargs = {
-        "echo": settings.debug,
-        "connect_args": {"check_same_thread": False},
-    }
-else:
-    # PostgreSQL — full connection pool
-    _engine_kwargs = {
-        "echo": settings.debug,
-        "pool_size": 10,
-        "max_overflow": 20,
-        "pool_pre_ping": True,
-    }
-
-engine = create_async_engine(settings.database_url, **_engine_kwargs)
+engine = create_async_engine(
+    settings.database_url,
+    echo=settings.debug,
+    pool_size=10,
+    max_overflow=20,
+    pool_pre_ping=True,
+)
 
 AsyncSessionLocal = async_sessionmaker(
     engine,
