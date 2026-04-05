@@ -5,16 +5,18 @@ POST /api/v1/forecast       → submit forecast job, get job_id immediately
 GET  /api/v1/forecast/{id}  → poll for result
 GET  /api/v1/forecasts      → list past forecasts with pagination
 DELETE /api/v1/forecast/{id} → cancel pending job
+
+In standalone mode, forecasts run synchronously (no Celery).
 """
 
 import uuid
+import math
 from datetime import datetime
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, func
 from loguru import logger
-from geoalchemy2.elements import WKTElement
 
 from api.models.database import get_db
 from api.models.forecast_run import ForecastRun, ForecastStatus, ForecastMode
@@ -27,77 +29,43 @@ from api.dependencies import get_current_api_key
 from api.settings import get_settings
 from api.rate_limit import limiter
 
-
 settings = get_settings()
 router   = APIRouter(prefix="/forecast", tags=["Forecasts"])
 
-import math as _math
 
 def _point_geom(lon: float, lat: float):
-    """
-    Build a PostGIS-compatible geometry value for a lat/lon point.
-
-    Returns WKTElement when connected to Postgres (production).
-    Returns a plain WKT string when connected to SQLite (tests) so
-    SQLAlchemy can bind it to a String column without mangling it.
-
-    The caller (ForecastRun constructor) does not need to change —
-    both return types are valid for their respective column types.
-    """
-    if _math.isnan(lon) or _math.isnan(lat):
-        raise ValueError(
-            f"Cannot build geometry for NaN coordinates: "
-            f"lon={lon}, lat={lat}")
+    """Build geometry value — plain WKT string in standalone, WKTElement in prod."""
+    if math.isnan(lon) or math.isnan(lat):
+        raise ValueError(f"Cannot build geometry for NaN: lon={lon}, lat={lat}")
 
     wkt = f"POINT({lon} {lat})"
 
-    # Detect the active dialect. The column type in the ORM model
-    # is Geometry on Postgres and String on SQLite (test override).
-    # Import lazily to avoid a hard dependency at module load time.
+    if settings.standalone:
+        return wkt
+
     try:
         from geoalchemy2.elements import WKTElement
-        from sqlalchemy import inspect as sa_inspect
-        from api.models.database import engine
-
-        # Use sync_engine directly since it exposes the dialect synchronously
-        dialect = getattr(engine, "sync_engine", engine).dialect.name
-        if dialect == "postgresql":
-            return WKTElement(wkt, srid=4326)
-        # SQLite path — return plain WKT string stored as TEXT
-        return wkt
+        return WKTElement(wkt, srid=4326)
     except Exception:
-        # Fallback: return plain string if engine is not yet
-        # initialised (e.g. during import-time module scanning).
         return wkt
+
+
+def _make_run_id() -> str:
+    """Return a string or UUID depending on mode."""
+    return str(uuid.uuid4())
 
 
 @router.post(
     "",
     response_model=ForecastJobResponse,
     summary="Submit a weather forecast request",
-    description="""
-Submit a NeuralGCM weather forecast for any location on Earth.
-
-**Returns immediately** with a `job_id`. The actual forecast runs
-asynchronously in a background worker (30-60 seconds on CPU).
-
-Poll `GET /forecast/{job_id}` until `status == "complete"`.
-
-**Modes:**
-- `realtime`: Initialises from today's ECMWF operational analysis
-- `historical`: Initialises from ERA5 reanalysis (1979-2020)
-
-**Variables returned** (when complete):
-Temperature, relative humidity, wind speed/direction at 850/500/250 hPa,
-total precipitable water, geopotential height Z500, surface pressure,
-atmospheric stability lapse rate, cloud water content, vorticity.
-    """,
     status_code=202,
 )
 @limiter.limit("30/minute")
 async def submit_forecast(
     request: Request,
     body: ForecastRequest,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     api_key=Depends(get_current_api_key),
 ):
@@ -109,8 +77,7 @@ async def submit_forecast(
     )
     cached = await get_cached_forecast(cache_key)
     if cached:
-        # Return cached result wrapped as completed job
-        job_id = str(uuid.uuid4())
+        job_id = _make_run_id()
         cached["job_id"]    = job_id
         cached["is_cached"] = True
         cached["status"]    = "complete"
@@ -118,22 +85,21 @@ async def submit_forecast(
             f"Cache hit for {body.location_name} "
             f"({body.lat},{body.lon}) → returning cached")
 
-        # Store cache hit in DB
         run = ForecastRun(
-            id=uuid.UUID(job_id),
+            id=job_id if settings.standalone else uuid.UUID(job_id),
             location_name=body.location_name,
             lat=body.lat, lon=body.lon,
             geom=_point_geom(body.lon, body.lat),
             forecast_days=body.days,
             init_date=body.init_date,
-            mode=ForecastMode(body.mode.value),
-            status=ForecastStatus.CACHED,
+            mode=body.mode.value if settings.standalone else ForecastMode(body.mode.value),
+            status="cached" if settings.standalone else ForecastStatus.CACHED,
             is_cached=True,
             cache_key=cache_key,
             result=cached,
             created_at=datetime.utcnow(),
             completed_at=datetime.utcnow(),
-            api_key_id=api_key.id if api_key else None,
+            api_key_id=None,
         )
         db.add(run)
         await db.commit()
@@ -147,54 +113,208 @@ async def submit_forecast(
         )
 
     # ── Create job record in DB ───────────────────────────────
-    job_id = str(uuid.uuid4())
+    job_id = _make_run_id()
     run = ForecastRun(
-        id=uuid.UUID(job_id),
+        id=job_id if settings.standalone else uuid.UUID(job_id),
         location_name=body.location_name,
         lat=body.lat, lon=body.lon,
         geom=_point_geom(body.lon, body.lat),
         forecast_days=body.days,
         init_date=body.init_date,
-        mode=ForecastMode(body.mode.value),
-        status=ForecastStatus.PENDING,
+        mode=body.mode.value if settings.standalone else ForecastMode(body.mode.value),
+        status="pending" if settings.standalone else ForecastStatus.PENDING,
         cache_key=cache_key,
         created_at=datetime.utcnow(),
-        api_key_id=api_key.id if api_key else None,
+        api_key_id=None,
     )
     db.add(run)
     await db.commit()
 
-    # ── Submit Celery task ────────────────────────────────────
-    from api.worker.tasks import run_forecast_task
-    task = run_forecast_task.apply_async(
-        kwargs={
-            "job_id":        job_id,
-            "location_name": body.location_name,
-            "lat":           body.lat,
-            "lon":           body.lon,
-            "days":          body.days,
-            "mode":          body.mode.value,
-            "init_date":     body.init_date,
-        },
-        task_id=job_id,
-    )
+    if settings.standalone:
+        # ── Run synchronously in background task ──────────────
+        background_tasks.add_task(
+            _run_forecast_standalone,
+            job_id, body.location_name, body.lat, body.lon,
+            body.days, body.mode.value, body.init_date,
+        )
+        logger.info(f"Forecast queued (standalone) | job={job_id}")
+        return ForecastJobResponse(
+            job_id=job_id,
+            status="pending",
+            message=f"Forecast queued for {body.location_name} (standalone mode).",
+            poll_url=f"{settings.api_prefix}/forecast/{job_id}",
+            estimated_seconds=45,
+        )
+    else:
+        # ── Submit Celery task ────────────────────────────────
+        from api.worker.tasks import run_forecast_task
+        task = run_forecast_task.apply_async(
+            kwargs={
+                "job_id":        job_id,
+                "location_name": body.location_name,
+                "lat":           body.lat,
+                "lon":           body.lon,
+                "days":          body.days,
+                "mode":          body.mode.value,
+                "init_date":     body.init_date,
+            },
+            task_id=job_id,
+        )
+        # Save celery task ID
+        result = await db.execute(
+            select(ForecastRun).where(ForecastRun.id == uuid.UUID(job_id)))
+        run_obj = result.scalar_one_or_none()
+        if run_obj:
+            run_obj.celery_id = task.id
+            await db.commit()
 
-    # Save celery task ID
-    run.celery_id = task.id
-    await db.commit()
+        logger.info(
+            f"Forecast queued | job={job_id} | "
+            f"loc={body.location_name} | mode={body.mode.value}")
 
-    logger.info(
-        f"Forecast queued | job={job_id} | "
-        f"loc={body.location_name} | mode={body.mode.value}")
+        return ForecastJobResponse(
+            job_id=job_id,
+            status="pending",
+            message=(f"Forecast queued for {body.location_name}. "
+                     f"Poll the poll_url for results."),
+            poll_url=f"{settings.api_prefix}/forecast/{job_id}",
+            estimated_seconds=45,
+        )
 
-    return ForecastJobResponse(
-        job_id=job_id,
-        status="pending",
-        message=(f"Forecast queued for {body.location_name}. "
-                 f"Poll the poll_url for results."),
-        poll_url=f"{settings.api_prefix}/forecast/{job_id}",
-        estimated_seconds=45,
-    )
+
+async def _run_forecast_standalone(
+    job_id: str, location_name: str,
+    lat: float, lon: float,
+    days: int, mode: str, init_date: str = None,
+):
+    """Run forecast synchronously in standalone mode (no Celery)."""
+    from api.models.database import AsyncSessionLocal
+    async with AsyncSessionLocal() as db:
+        try:
+            # Mark as running
+            result = await db.execute(
+                select(ForecastRun).where(ForecastRun.id == job_id))
+            run = result.scalar_one_or_none()
+            if run:
+                run.status = "running"
+                run.started_at = datetime.utcnow()
+                await db.commit()
+
+            # Run NeuralGCM inference
+            from neuralgcm_weather.pipeline.forecast import run_forecast_pipeline
+            import numpy as np
+
+            forecast_result = run_forecast_pipeline(
+                location_name=location_name,
+                lat=lat, lon=lon,
+                forecast_days=days,
+                init_date=f"{init_date}T00:00" if init_date else None,
+                mode=mode,
+                save=True,
+            )
+
+            fp      = forecast_result["forecast_point"]
+            elapsed = forecast_result["elapsed_seconds"]
+
+            def _compass(deg):
+                if deg is None:
+                    return None
+                dirs = ["N","NNE","NE","ENE","E","ESE","SE","SSE",
+                        "S","SSW","SW","WSW","W","WNW","NW","NNW"]
+                return dirs[int(round(float(deg) + 11.25) // 22) % 16]
+
+            def _stability(lr):
+                if lr is None or np.isnan(lr):
+                    return None
+                if lr > 9.8:
+                    return "UNSTABLE"
+                if lr > 7.0:
+                    return "Conditionally unstable"
+                return "Stable"
+
+            daily = []
+            for i, dt in enumerate(fp.dates):
+                def _v(arr, i=i):
+                    if arr is None:
+                        return None
+                    v = arr[i]
+                    return None if np.isnan(v) else round(float(v), 4)
+
+                wdir = _v(fp.wind_dir_850)
+                lr   = _v(fp.lapse_rate)
+                daily.append({
+                    "date": dt.strftime("%Y-%m-%d"),
+                    "temperature_c_850":    _v(fp.temperature_c_850),
+                    "temperature_c_500":    _v(fp.temperature_c_500),
+                    "rh_850":               _v(fp.rh_850),
+                    "rh_500":               _v(fp.rh_500),
+                    "specific_humidity_850": _v(fp.specific_humidity_850),
+                    "tpw_mm":               _v(fp.tpw_mm),
+                    "wind_speed_850":       _v(fp.wind_speed_850),
+                    "wind_speed_500":       _v(fp.wind_speed_500),
+                    "wind_speed_250":       _v(fp.wind_speed_250),
+                    "wind_dir_850":         wdir,
+                    "wind_dir_compass":     _compass(wdir),
+                    "u_850":                _v(fp.u_850),
+                    "v_850":                _v(fp.v_850),
+                    "z500_m":               _v(fp.z500_m),
+                    "mslp_hpa":             _v(fp.mslp_hpa),
+                    "lapse_rate":           lr,
+                    "stability":            _stability(lr),
+                    "clwc_gkg_850":         _v(fp.clwc_gkg_850),
+                    "ciwc_gkg_850":         _v(fp.ciwc_gkg_850),
+                    "vorticity_850":        _v(fp.vorticity_850),
+                })
+
+            output = {
+                "job_id":           job_id,
+                "status":           "complete",
+                "location_name":    fp.location_name,
+                "lat":              fp.lat,
+                "lon":              fp.lon,
+                "model_lat":        fp.model_lat,
+                "model_lon":        fp.model_lon,
+                "init_time_utc":    forecast_result["init_time"].strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "mode_used":        forecast_result["mode_used"],
+                "forecast_days":    fp.days,
+                "elapsed_seconds":  round(elapsed, 2),
+                "is_cached":        False,
+                "created_at":       datetime.utcnow().isoformat() + "Z",
+                "daily":            daily,
+                "sanity_ok":        len(forecast_result["violations"]) == 0,
+                "sanity_violations": forecast_result["violations"],
+                "json_path":        forecast_result["saved_files"].get("json"),
+                "csv_path":         forecast_result["saved_files"].get("csv"),
+                "png_path":         forecast_result["saved_files"].get("png"),
+            }
+
+            # Update DB
+            result = await db.execute(
+                select(ForecastRun).where(ForecastRun.id == job_id))
+            run = result.scalar_one_or_none()
+            if run:
+                run.status = "complete"
+                run.completed_at = datetime.utcnow()
+                run.elapsed_sec = elapsed
+                run.result = output
+                run.sanity_ok = output["sanity_ok"]
+                await db.commit()
+
+            # Cache the result
+            cache_key = build_cache_key(lat, lon, days, mode, init_date)
+            await set_cached_forecast(cache_key, output)
+
+            logger.success(f"Forecast complete (standalone) | job={job_id} | elapsed={elapsed:.1f}s")
+
+        except Exception as exc:
+            logger.error(f"Forecast failed (standalone) | job={job_id} | error={exc}")
+            result = await db.execute(
+                select(ForecastRun).where(ForecastRun.id == job_id))
+            run = result.scalar_one_or_none()
+            if run:
+                run.status = "failed"
+                run.error_msg = str(exc)
+                await db.commit()
 
 
 @router.get(
@@ -207,19 +327,21 @@ async def get_forecast(
     db: AsyncSession = Depends(get_db),
     api_key=Depends(get_current_api_key),
 ):
-    # Look up in DB
-    result = await db.execute(
-        select(ForecastRun).where(
-            ForecastRun.id == uuid.UUID(job_id)))
+    if settings.standalone:
+        result = await db.execute(
+            select(ForecastRun).where(ForecastRun.id == job_id))
+    else:
+        result = await db.execute(
+            select(ForecastRun).where(
+                ForecastRun.id == uuid.UUID(job_id)))
     run = result.scalar_one_or_none()
 
     if not run:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
 
-    # Build response
     base = {
         "job_id":           str(run.id),
-        "status":           run.status.value,
+        "status":           run.status if isinstance(run.status, str) else run.status.value,
         "location_name":    run.location_name,
         "lat":              run.lat,
         "lon":              run.lon,
@@ -230,27 +352,26 @@ async def get_forecast(
         "paper_reference":  "Kochkov et al. 2024 (arXiv:2311.07222v3)",
     }
 
-    if run.status in (ForecastStatus.PENDING, ForecastStatus.RUNNING):
+    status_val = run.status if isinstance(run.status, str) else run.status.value
+
+    if status_val in ("pending", "running"):
         return ForecastResultResponse(**base, daily=[])
 
-    if run.status == ForecastStatus.FAILED:
+    if status_val == "failed":
         return ForecastResultResponse(**base, daily=[], error=run.error_msg)
 
     if run.result:
         r = run.result
         daily = [DailyForecast(**d) for d in r.get("daily", [])]
 
-        # Store to cache for subsequent identical requests
-        cache_key = run.cache_key
-        if cache_key and not run.is_cached:
-            await set_cached_forecast(cache_key, r)
+        if run.cache_key and not run.is_cached:
+            await set_cached_forecast(run.cache_key, r)
 
         import os as _os
 
         def _static_url(raw_path: str | None) -> str | None:
             if not raw_path:
                 return None
-            # Strip to filename only — files live in ./forecasts/
             fname = _os.path.basename(raw_path)
             return f"/static/forecasts/{fname}"
 
@@ -276,25 +397,19 @@ async def get_forecast(
     "/{job_id}",
     status_code=204,
     summary="Cancel a pending forecast job or delete a completed record",
-    description="""
-Cancel a **pending** or **running** job (revokes the Celery task).
-Delete the DB record for **complete** or **failed** jobs.
-Returns 204 No Content on success.
-Returns 409 Conflict if the job is already running and cannot be safely
-cancelled (Celery task has already begun NeuralGCM inference).
-    """,
 )
 async def delete_forecast(
     job_id: str,
     request: Request,
-    force: bool = Query(
-        default=False,
-        description="Force-delete even if status is running"),
+    force: bool = Query(default=False),
     db: AsyncSession = Depends(get_db),
     api_key=Depends(get_current_api_key),
 ):
     try:
-        uid = uuid.UUID(job_id)
+        if settings.standalone:
+            uid = job_id
+        else:
+            uid = uuid.UUID(job_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid job ID format")
 
@@ -305,28 +420,23 @@ async def delete_forecast(
     if not run:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
 
-    if run.status == ForecastStatus.RUNNING and not force:
+    status_val = run.status if isinstance(run.status, str) else run.status.value
+
+    if status_val == "running" and not force:
         raise HTTPException(
             status_code=409,
-            detail=(
-                "Job is currently running. NeuralGCM inference is in "
-                "progress and cannot be cleanly cancelled. Use "
-                "?force=true to delete the DB record anyway (the "
-                "Celery task will complete or fail independently)."))
+            detail="Job is currently running. Use ?force=true to delete.")
 
-    # Revoke Celery task if still pending
-    if run.status == ForecastStatus.PENDING and run.celery_id:
+    if not settings.standalone and status_val == "pending" and run.celery_id:
         try:
             from api.worker.celery_app import celery_app
             celery_app.control.revoke(run.celery_id, terminate=False)
-            logger.info(f"Celery task {run.celery_id} revoked for job {job_id}")
         except Exception as e:
             logger.warning(f"Could not revoke Celery task: {e}")
 
     await db.delete(run)
     await db.commit()
-    logger.info(f"Forecast job {job_id} deleted (status was {run.status.value})")
-    # 204 No Content — FastAPI returns empty body automatically
+    logger.info(f"Forecast job {job_id} deleted (status was {status_val})")
 
 
 @router.get(
@@ -346,13 +456,18 @@ async def list_forecasts(
     query = select(ForecastRun).order_by(desc(ForecastRun.created_at))
 
     if status:
-        query = query.where(ForecastRun.status == ForecastStatus(status))
+        if settings.standalone:
+            query = query.where(ForecastRun.status == status)
+        else:
+            query = query.where(ForecastRun.status == ForecastStatus(status))
 
-    # Count total
     count_query = select(func.count(ForecastRun.id))
     if status:
-        count_query = count_query.where(
-            ForecastRun.status == ForecastStatus(status))
+        if settings.standalone:
+            count_query = count_query.where(ForecastRun.status == status)
+        else:
+            count_query = count_query.where(
+                ForecastRun.status == ForecastStatus(status))
     count_result = await db.execute(count_query)
     total = count_result.scalar() or 0
 
@@ -362,8 +477,9 @@ async def list_forecasts(
 
     items = []
     for run in runs:
+        status_val = run.status if isinstance(run.status, str) else run.status.value
         items.append(ForecastResultResponse(
-            job_id=str(run.id), status=run.status.value,
+            job_id=str(run.id), status=status_val,
             location_name=run.location_name, lat=run.lat, lon=run.lon,
             forecast_days=run.forecast_days, is_cached=run.is_cached or False,
             created_at=run.created_at.isoformat() + "Z",
