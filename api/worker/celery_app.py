@@ -25,6 +25,5 @@ celery_app.conf.update(
     task_time_limit        = settings.celery_task_timeout + 60,
     worker_prefetch_multiplier = 1,   # one task at a time per worker
     task_acks_late         = True,    # ack after completion, not before
-    worker_max_tasks_per_child = 10,  # restart worker after 10 tasks (JAX memory)
     result_expires         = 86400,   # keep results 24h
 )
