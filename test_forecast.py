@@ -1,4 +1,4 @@
-"""Quick test to hit the forecast endpoint and see the actual error."""
+"""Quick test to hit the forecast endpoint and see the actual error traceback."""
 import requests
 import json
 
@@ -15,10 +15,14 @@ payload = {
 try:
     resp = requests.post(url, json=payload, timeout=30)
     print(f"Status: {resp.status_code}")
-    print(f"Headers: {dict(resp.headers)}")
     try:
-        print(f"Body: {json.dumps(resp.json(), indent=2)}")
+        data = resp.json()
+        if "traceback" in data:
+            print(f"\n=== ERROR ===\n{data['detail']}\n")
+            print(f"=== TRACEBACK ===\n{data['traceback']}")
+        else:
+            print(json.dumps(data, indent=2))
     except:
-        print(f"Body (raw): {resp.text[:2000]}")
+        print(f"Body: {resp.text[:3000]}")
 except Exception as e:
     print(f"Request error: {e}")
