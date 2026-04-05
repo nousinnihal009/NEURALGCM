@@ -8,8 +8,8 @@ import { useForecastStore } from "../../store/forecastStore";
 import { useForecast } from "../../hooks/useForecast";
 import { ForecastMarker } from "./ForecastMarker";
 
-const MAPBOX_TOKEN  = import.meta.env.VITE_MAPBOX_TOKEN || "";
-const MAP_STYLE_DARK = MAPBOX_TOKEN
+const MAPBOX_TOKEN  = import.meta.env.VITE_MAPBOX_TOKEN || "pk.eyJ1IjoiZHVtbXkiLCJhIjoiYmxhbmsiLCJ2IjoxfQ.dummy_token_to_bypass_mapbox_gl_v3_validation";
+const MAP_STYLE_DARK = import.meta.env.VITE_MAPBOX_TOKEN
   ? "mapbox://styles/mapbox/dark-v11"
   : "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json";
 
