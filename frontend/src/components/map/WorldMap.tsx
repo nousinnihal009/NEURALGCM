@@ -2,16 +2,14 @@ import { useCallback, useRef, useState } from "react";
 import Map, {
   Marker, NavigationControl, ScaleControl,
   type MapRef, type MapMouseEvent
-} from "react-map-gl/mapbox";
-import "mapbox-gl/dist/mapbox-gl.css";
+} from "react-map-gl/maplibre";
+import "maplibre-gl/dist/maplibre-gl.css";
 import { useForecastStore } from "../../store/forecastStore";
 import { useForecast } from "../../hooks/useForecast";
 import { ForecastMarker } from "./ForecastMarker";
 
-const MAPBOX_TOKEN  = import.meta.env.VITE_MAPBOX_TOKEN || "pk.eyJ1IjoiZHVtbXkiLCJhIjoiYmxhbmsiLCJ2IjoxfQ.dummy_token_to_bypass_mapbox_gl_v3_validation";
-const MAP_STYLE_DARK = import.meta.env.VITE_MAPBOX_TOKEN
-  ? "mapbox://styles/mapbox/dark-v11"
-  : "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json";
+// CartoDB dark-matter — free, no token needed
+const MAP_STYLE = "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json";
 
 export function WorldMap() {
   const mapRef = useRef<MapRef>(null);
@@ -49,8 +47,7 @@ export function WorldMap() {
     <div className="relative w-full h-full">
       <Map
         ref={mapRef}
-        mapboxAccessToken={MAPBOX_TOKEN || undefined}
-        mapStyle={MAP_STYLE_DARK}
+        mapStyle={MAP_STYLE}
         initialViewState={{
           longitude: mapCenter[0],
           latitude:  mapCenter[1],
