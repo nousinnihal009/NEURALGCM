@@ -58,7 +58,7 @@ class Settings(BaseSettings):
     # Celery
     celery_broker_url: str = "redis://localhost:6379/1"
     celery_result_backend: str = "redis://localhost:6379/2"
-    celery_task_timeout: int = 300  # 5 minutes max per forecast
+    celery_task_timeout: int = 1800  # 30 minutes max per forecast
 
     # NeuralGCM
     neuralgcm_model: str = "v1/deterministic_2_8_deg.pkl"
