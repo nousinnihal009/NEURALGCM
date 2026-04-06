@@ -8,7 +8,7 @@ import { useForecastStore } from "../store/forecastStore";
 import type { MapLocation } from "../api/types";
 
 const POLL_INTERVAL_MS = 3000;
-const MAX_POLL_MS      = 300_000;
+const MAX_POLL_MS      = 1200_000;
 
 export function useForecast() {
   const {
@@ -38,6 +38,7 @@ export function useForecast() {
       if (elapsed > MAX_POLL_MS) {
         clearInterval(pollTimer.current!);
         setIsPolling(false);
+        setSelectedLocation(null);
         toast.error("Forecast timed out. Please try again.");
         return;
       }
@@ -60,6 +61,7 @@ export function useForecast() {
         if (result.status === "failed") {
           clearInterval(pollTimer.current!);
           setIsPolling(false);
+          setSelectedLocation(null);
           toast.error(`Forecast failed: ${result.error || "Unknown error"}`);
         }
       } catch (e) {
