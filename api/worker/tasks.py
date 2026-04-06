@@ -203,7 +203,8 @@ def run_forecast_task(
         # autoretry_for will re-raise and retry automatically;
         # on the last retry Celery raises WorkerLostError or MaxRetriesExceededError
         # which propagates here with retries == max_retries.
-        if self.request.retries >= self.max_retries:
+        is_no_retry = isinstance(exc, _NO_RETRY)
+        if self.request.retries >= self.max_retries or is_no_retry:
             _update_job_status(job_id, "failed", error=str(exc))
         raise   # always re-raise — autoretry_for takes it from here
 
