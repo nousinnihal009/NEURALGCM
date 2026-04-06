@@ -1,4 +1,12 @@
 import os
+import sys
+
+# Ensure Windows Celery workers can find project root modules
+# like 'neuralgcm_weather' without needing PYTHONPATH defined.
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
 os.environ["JAX_PLATFORMS"]                 = "cpu"
 os.environ["XLA_FLAGS"]                     = "--xla_cpu_use_thunk_runtime=false"
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
