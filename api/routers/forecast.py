@@ -27,6 +27,16 @@ from api.dependencies import get_current_api_key
 from api.settings import get_settings
 from api.rate_limit import limiter
 
+# Phase 4: Prometheus metrics
+try:
+    from api.metrics import (
+        forecast_counter, inference_duration,
+        cache_hits, cache_misses, active_jobs,
+    )
+    METRICS_AVAILABLE = True
+except ImportError:
+    METRICS_AVAILABLE = False
+
 
 settings = get_settings()
 router   = APIRouter(prefix="/forecast", tags=["Forecasts"])
@@ -118,6 +128,11 @@ async def submit_forecast(
             f"Cache hit for {body.location_name} "
             f"({body.lat},{body.lon}) → returning cached")
 
+        # Record cache hit metric
+        if METRICS_AVAILABLE:
+            cache_hits.inc()
+            forecast_counter.labels(mode=body.mode.value, status="cached").inc()
+
         # Store cache hit in DB
         run = ForecastRun(
             id=uuid.UUID(job_id),
@@ -164,6 +179,11 @@ async def submit_forecast(
     db.add(run)
     await db.commit()
 
+    # Record cache miss metric
+    if METRICS_AVAILABLE:
+        cache_misses.inc()
+        active_jobs.inc()
+
     # ── Run forecast in background thread (bypasses Celery) ──
     import threading
 
@@ -191,9 +211,21 @@ async def submit_forecast(
             )
             update_job_status(job_id, "complete", result)
             logger.success(f"Forecast complete | job={job_id}")
+            # Record completion metrics
+            if METRICS_AVAILABLE:
+                forecast_counter.labels(
+                    mode=body.mode.value, status="complete").inc()
+                elapsed = result.get("elapsed_seconds")
+                if elapsed:
+                    inference_duration.observe(elapsed)
+                active_jobs.dec()
         except Exception as exc:
             logger.error(f"Forecast failed | job={job_id} | {exc}")
             update_job_status(job_id, "failed", error=str(exc))
+            if METRICS_AVAILABLE:
+                forecast_counter.labels(
+                    mode=body.mode.value, status="failed").inc()
+                active_jobs.dec()
 
     t = threading.Thread(target=_run_in_thread, daemon=True)
     t.start()
