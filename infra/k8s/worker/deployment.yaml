@@ -1,0 +1,107 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: neuralgcm-worker
+  namespace: neuralgcm
+  labels:
+    app: neuralgcm-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: neuralgcm-worker
+  strategy:
+    type: Recreate   # workers can't run two at once on same GPU
+  template:
+    metadata:
+      labels:
+        app: neuralgcm-worker
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9691"
+    spec:
+      serviceAccountName: neuralgcm-sa
+
+      # MUST run on GPU nodes
+      nodeSelector:
+        cloud.google.com/gke-accelerator: nvidia-tesla-t4
+
+      # Tolerate the GPU taint
+      tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Exists"
+        effect: "NoSchedule"
+
+      containers:
+      - name: worker
+        image: REGISTRY_URL/worker:IMAGE_TAG
+        imagePullPolicy: Always
+
+        envFrom:
+        - configMapRef:
+            name: neuralgcm-worker-config
+
+        env:
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: neuralgcm-secrets
+              key: db-password
+        # GPU JAX — this is the critical config change from Phase 1-3
+        - name: JAX_PLATFORMS
+          value: "cuda"
+        - name: XLA_FLAGS
+          value: "--xla_gpu_cuda_data_dir=/usr/local/cuda"
+        - name: XLA_PYTHON_CLIENT_MEM_FRACTION
+          value: "0.85"
+        - name: XLA_PYTHON_CLIENT_PREALLOCATE
+          value: "false"
+        - name: NEURALGCM_CACHE_DIR
+          value: "/data/cache"
+
+        resources:
+          requests:
+            cpu: "2000m"
+            memory: "8Gi"
+            nvidia.com/gpu: "1"    # request 1 GPU
+          limits:
+            cpu: "4000m"
+            memory: "12Gi"
+            nvidia.com/gpu: "1"   # limit to 1 GPU
+
+        # Persistent cache for NeuralGCM checkpoint (avoid re-download)
+        volumeMounts:
+        - name: neuralgcm-cache
+          mountPath: /data/cache
+
+        # Liveness: celery inspect ping
+        livenessProbe:
+          exec:
+            command:
+            - celery
+            - -A
+            - api.worker.celery_app
+            - inspect
+            - ping
+          initialDelaySeconds: 60
+          periodSeconds: 60
+          timeoutSeconds: 20
+          failureThreshold: 3
+
+      volumes:
+      - name: neuralgcm-cache
+        persistentVolumeClaim:
+          claimName: neuralgcm-cache-pvc
+---
+# PVC for checkpoint caching across pod restarts
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: neuralgcm-cache-pvc
+  namespace: neuralgcm
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: standard-rwo
