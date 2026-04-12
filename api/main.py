@@ -17,6 +17,20 @@ from slowapi.errors import RateLimitExceeded
 from api.rate_limit import limiter
 from loguru import logger
 
+# Phase 4: Prometheus metrics for Grafana dashboard
+try:
+    from prometheus_fastapi_instrumentator import Instrumentator
+    PROMETHEUS_AVAILABLE = True
+except ImportError:
+    PROMETHEUS_AVAILABLE = False
+    logger.warning("prometheus-fastapi-instrumentator not installed — /metrics disabled")
+
+# Import custom NeuralGCM metrics (counters, histograms, gauges)
+from api.metrics import (  # noqa: F401 — re-exported for other modules
+    forecast_counter, inference_duration, cache_hits, cache_misses,
+    active_jobs, mae_t850, mae_z500, unique_locations,
+)
+
 from api.settings import get_settings
 from api.models.database import engine, Base
 from api.cache.redis_client import get_redis, close_redis
@@ -85,6 +99,10 @@ by Google Research (Kochkov et al., 2024).
 # ── Attach limiter to app state (slowapi requirement) ─────────
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# ── Prometheus metrics endpoint (/metrics) ────────────────────
+if PROMETHEUS_AVAILABLE:
+    Instrumentator().instrument(app).expose(app)
 
 # ── Debug: return traceback in 500 responses (dev only) ───────
 if settings.debug:
