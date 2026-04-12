@@ -1,0 +1,25 @@
+# Scale GPU workers based on Celery queue depth
+# Uses custom metric from Prometheus adapter
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: neuralgcm-worker-hpa
+  namespace: neuralgcm
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: neuralgcm-worker
+  minReplicas: 0    # scale to zero when idle — saves GPU cost!
+  maxReplicas: 3
+  metrics:
+  - type: External
+    external:
+      metric:
+        name: celery_queue_length
+        selector:
+          matchLabels:
+            queue: neuralgcm
+      target:
+        type: AverageValue
+        averageValue: "1"   # one worker per queued job
