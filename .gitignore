@@ -1,16 +1,55 @@
 # Python
 __pycache__/
 *.pyc
+*.egg-info/
+dist/
+build/
 
 # Environment
 neuralgcm-env/
 .env
+.env.local
+.env.production
 
 # Logs
 *.log
+logs/
 
 # Outputs (images)
 *.png
 
 # System
 .DS_Store
+Thumbs.db
+
+# ── Phase 4: Infrastructure ──────────────────────────────────
+# Terraform
+infra/terraform/.terraform/
+infra/terraform/.terraform.lock.hcl
+infra/terraform/*.tfstate
+infra/terraform/*.tfstate.backup
+infra/terraform/*.tfvars
+infra/terraform/tfplan
+infra/terraform/.terraform.tfstate.lock.info
+
+# Kubernetes generated secrets (never commit)
+infra/k8s/**/secret*.yaml
+!infra/k8s/**/secret*.yaml.example
+
+# Docker
+*.tar
+*.tar.gz
+
+# Node
+node_modules/
+frontend/dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Cache
+cache/
+.neuralgcm/
