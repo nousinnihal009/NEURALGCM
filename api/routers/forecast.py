@@ -164,23 +164,40 @@ async def submit_forecast(
     db.add(run)
     await db.commit()
 
-    # ── Submit Celery task ────────────────────────────────────
-    from api.worker.tasks import run_forecast_task
-    task = run_forecast_task.apply_async(
-        kwargs={
-            "job_id":        job_id,
-            "location_name": body.location_name,
-            "lat":           body.lat,
-            "lon":           body.lon,
-            "days":          body.days,
-            "mode":          body.mode.value,
-            "init_date":     body.init_date,
-        },
-        task_id=job_id,
-    )
+    # ── Run forecast in background thread (bypasses Celery) ──
+    import threading
 
-    # Save celery task ID
-    run.celery_id = task.id
+    def _run_in_thread():
+        """Run forecast pipeline directly in a background thread."""
+        import sys, os
+        # Ensure project root is on sys.path
+        project_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", ".."))
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
+
+        from api.worker.sync_runner import (
+            update_job_status, run_forecast_sync)
+        try:
+            update_job_status(job_id, "running")
+            result = run_forecast_sync(
+                job_id=job_id,
+                location_name=body.location_name,
+                lat=body.lat,
+                lon=body.lon,
+                days=body.days,
+                mode=body.mode.value,
+                init_date=body.init_date,
+            )
+            update_job_status(job_id, "complete", result)
+            logger.success(f"Forecast complete | job={job_id}")
+        except Exception as exc:
+            logger.error(f"Forecast failed | job={job_id} | {exc}")
+            update_job_status(job_id, "failed", error=str(exc))
+
+    t = threading.Thread(target=_run_in_thread, daemon=True)
+    t.start()
+
     await db.commit()
 
     logger.info(
