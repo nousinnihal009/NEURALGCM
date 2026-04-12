@@ -1,0 +1,133 @@
+{
+  "title": "NeuralGCM Weather Platform",
+  "uid": "neuralgcm-main",
+  "tags": ["neuralgcm", "weather", "ml"],
+  "timezone": "UTC",
+  "refresh": "30s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Forecast Inference Latency (p50/p95/p99)",
+      "type": "graph",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, rate(neuralgcm_inference_duration_seconds_bucket[5m]))",
+          "legendFormat": "p95 latency"
+        },
+        {
+          "expr": "histogram_quantile(0.50, rate(neuralgcm_inference_duration_seconds_bucket[5m]))",
+          "legendFormat": "p50 latency"
+        },
+        {
+          "expr": "histogram_quantile(0.99, rate(neuralgcm_inference_duration_seconds_bucket[5m]))",
+          "legendFormat": "p99 latency"
+        }
+      ],
+      "yaxes": [{"format": "s", "label": "Seconds"}]
+    },
+    {
+      "id": 2,
+      "title": "Forecasts Per Hour",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
+      "targets": [
+        {
+          "expr": "rate(neuralgcm_forecasts_total[1h]) * 3600",
+          "legendFormat": "forecasts/hr"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Cache Hit Rate",
+      "type": "gauge",
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
+      "targets": [
+        {
+          "expr": "rate(neuralgcm_cache_hits_total[5m]) / (rate(neuralgcm_cache_hits_total[5m]) + rate(neuralgcm_cache_misses_total[5m])) * 100",
+          "legendFormat": "Cache hit %"
+        }
+      ],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}},
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "steps": [
+              {"color": "red", "value": 0},
+              {"color": "yellow", "value": 50},
+              {"color": "green", "value": 75}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Forecast MAE vs ERA5 (T850, Z500, WS850)",
+      "type": "graph",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "targets": [
+        {
+          "expr": "neuralgcm_mae_temperature_850",
+          "legendFormat": "T850 MAE (K)"
+        },
+        {
+          "expr": "neuralgcm_mae_z500",
+          "legendFormat": "Z500 MAE (m)"
+        }
+      ],
+      "description": "Paper benchmark: T850 Day-1 MAE ~0.8K"
+    },
+    {
+      "id": 5,
+      "title": "GPU Utilisation (Celery Workers)",
+      "type": "graph",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "targets": [
+        {
+          "expr": "DCGM_FI_DEV_GPU_UTIL{namespace='neuralgcm'}",
+          "legendFormat": "GPU {{gpu}}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Celery Queue Depth",
+      "type": "graph",
+      "gridPos": {"h": 6, "w": 8, "x": 0, "y": 16},
+      "targets": [
+        {
+          "expr": "celery_queue_length{queue='neuralgcm'}",
+          "legendFormat": "Pending jobs"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "API Error Rate",
+      "type": "graph",
+      "gridPos": {"h": 6, "w": 8, "x": 8, "y": 16},
+      "targets": [
+        {
+          "expr": "rate(http_requests_total{status=~'5..', job='neuralgcm-api'}[5m])",
+          "legendFormat": "5xx errors/s"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Active Forecast Locations",
+      "type": "stat",
+      "gridPos": {"h": 6, "w": 8, "x": 16, "y": 16},
+      "targets": [
+        {
+          "expr": "neuralgcm_unique_locations_24h",
+          "legendFormat": "Unique locations (24h)"
+        }
+      ]
+    }
+  ]
+}
