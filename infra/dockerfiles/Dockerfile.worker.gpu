@@ -1,0 +1,54 @@
+# CUDA base image — enables jax[cuda12] GPU inference
+# This is the most important Dockerfile for Phase 4
+# NeuralGCM inference: ~60s on CPU → ~2.5s on T4 GPU
+FROM nvidia/cuda:12.3.1-cudnn8-runtime-ubuntu22.04
+
+WORKDIR /app
+
+# System deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 python3-pip python3.11-dev \
+    build-essential libpq-dev libeccodes-dev curl wget && \
+    rm -rf /var/lib/apt/lists/* && \
+    ln -sf /usr/bin/python3.11 /usr/bin/python && \
+    ln -sf /usr/bin/pip3 /usr/bin/pip
+
+# Install JAX with CUDA 12 support — KEY DIFFERENCE from Phase 1-3
+# This is what enables 2.5s inference on T4 GPU
+RUN pip install --no-cache-dir \
+    "jax[cuda12_pip]==0.4.30" \
+    -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+
+# Install all other Python deps
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# App source
+COPY neuralgcm_weather/ ./neuralgcm_weather/
+COPY api/ ./api/
+COPY config.yaml .
+
+# Non-root user
+RUN useradd -m -u 1000 workeruser && \
+    chown -R workeruser:workeruser /app
+USER workeruser
+
+ENV PYTHONPATH="/app"
+ENV PYTHONUNBUFFERED=1
+
+# GPU JAX configuration
+# JAX_PLATFORMS=cuda tells JAX to use the NVIDIA GPU
+# This is the ONLY change from the CPU worker
+ENV JAX_PLATFORMS="cuda"
+ENV XLA_FLAGS="--xla_gpu_cuda_data_dir=/usr/local/cuda"
+ENV XLA_PYTHON_CLIENT_PREALLOCATE="false"
+ENV XLA_PYTHON_CLIENT_MEM_FRACTION="0.85"
+
+# Celery worker command
+# concurrency=1 per GPU (one NeuralGCM inference at a time per GPU)
+# max-tasks-per-child=10 restarts worker after 10 tasks (JAX memory)
+CMD ["celery", "-A", "api.worker.celery_app", "worker", \
+     "--loglevel=info", \
+     "--concurrency=1", \
+     "--max-tasks-per-child=10", \
+     "--queues=neuralgcm"]
