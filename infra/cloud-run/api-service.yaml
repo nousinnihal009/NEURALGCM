@@ -1,0 +1,48 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: neuralgcm-api
+  namespace: neuralgcm
+  annotations:
+    run.googleapis.com/ingress: all
+    run.googleapis.com/execution-environment: gen2
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: "1"
+        autoscaling.knative.dev/maxScale: "10"
+        run.googleapis.com/cpu-throttling: "false"
+        run.googleapis.com/vpc-access-connector: neuralgcm-weather-connector
+        run.googleapis.com/vpc-access-egress: private-ranges-only
+    spec:
+      serviceAccountName: neuralgcm-weather-sa
+      containerConcurrency: 80
+      timeoutSeconds: 300
+      containers:
+      - image: REGISTRY_URL/api:IMAGE_TAG
+        ports:
+        - containerPort: 8000
+        env:
+        - name: ENVIRONMENT
+          value: production
+        - name: JAX_PLATFORMS
+          value: cpu
+        - name: XLA_PYTHON_CLIENT_PREALLOCATE
+          value: "false"
+        resources:
+          limits:
+            cpu: "2"
+            memory: 4Gi
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          failureThreshold: 12
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          periodSeconds: 30
