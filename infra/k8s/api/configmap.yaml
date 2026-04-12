@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: neuralgcm-api-config
+  namespace: neuralgcm
+data:
+  POSTGRES_HOST: "CLOUD_SQL_PRIVATE_IP"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: "neuralgcm_weather"
+  POSTGRES_USER: "neuralgcm"
+  REDIS_HOST: "REDIS_HOST"
+  REDIS_PORT: "6379"
+  CELERY_BROKER_URL: "redis://REDIS_HOST:6379/1"
+  CELERY_RESULT_BACKEND: "redis://REDIS_HOST:6379/2"
+  FORECAST_BUCKET: "PROJECT_ID-neuralgcm-forecasts"
+  APP_NAME: "NeuralGCM Weather Intelligence"
+  API_PREFIX: "/api/v1"
+  LOG_LEVEL: "info"
