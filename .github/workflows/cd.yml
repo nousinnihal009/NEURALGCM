@@ -1,0 +1,134 @@
+name: CD — Deploy to GCP
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Docker image tag to deploy"
+        required: false
+        default: "latest"
+
+env:
+  PROJECT_ID:   ${{ secrets.GCP_PROJECT_ID }}
+  REGION:       us-central1
+  REGISTRY:     us-central1-docker.pkg.dev
+  REPO:         neuralgcm-weather
+  IMAGE_TAG:    ${{ github.sha }}
+
+jobs:
+  build-push:
+    name: Build & Push Docker images
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write   # for Workload Identity Federation
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Authenticate to GCP (Workload Identity — no long-lived keys!)
+      uses: google-github-actions/auth@v2
+      with:
+        workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+        service_account: ${{ secrets.GCP_SA_EMAIL }}
+
+    - name: Set up Cloud SDK
+      uses: google-github-actions/setup-gcloud@v2
+
+    - name: Configure Docker for Artifact Registry
+      run: gcloud auth configure-docker ${{ env.REGISTRY }}
+
+    - name: Build and push API image
+      run: |
+        docker build \
+          -f infra/dockerfiles/Dockerfile.api.prod \
+          -t $REGISTRY/$PROJECT_ID/$REPO/api:$IMAGE_TAG \
+          -t $REGISTRY/$PROJECT_ID/$REPO/api:latest \
+          .
+        docker push $REGISTRY/$PROJECT_ID/$REPO/api:$IMAGE_TAG
+        docker push $REGISTRY/$PROJECT_ID/$REPO/api:latest
+
+    - name: Build and push GPU worker image
+      run: |
+        docker build \
+          -f infra/dockerfiles/Dockerfile.worker.gpu \
+          -t $REGISTRY/$PROJECT_ID/$REPO/worker:$IMAGE_TAG \
+          -t $REGISTRY/$PROJECT_ID/$REPO/worker:latest \
+          .
+        docker push $REGISTRY/$PROJECT_ID/$REPO/worker:$IMAGE_TAG
+        docker push $REGISTRY/$PROJECT_ID/$REPO/worker:latest
+
+    - name: Build and push frontend image
+      run: |
+        docker build \
+          -f infra/dockerfiles/Dockerfile.frontend \
+          -t $REGISTRY/$PROJECT_ID/$REPO/frontend:$IMAGE_TAG \
+          -t $REGISTRY/$PROJECT_ID/$REPO/frontend:latest \
+          .
+        docker push $REGISTRY/$PROJECT_ID/$REPO/frontend:$IMAGE_TAG
+
+  deploy:
+    name: Deploy to GKE
+    needs: build-push
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Authenticate to GCP
+      uses: google-github-actions/auth@v2
+      with:
+        workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+        service_account: ${{ secrets.GCP_SA_EMAIL }}
+
+    - name: Get GKE credentials
+      uses: google-github-actions/get-gke-credentials@v2
+      with:
+        cluster_name: neuralgcm-weather-cluster
+        location: ${{ env.REGION }}
+        project_id: ${{ env.PROJECT_ID }}
+
+    - name: Update image tags in manifests
+      run: |
+        REGISTRY_URL=$REGISTRY/$PROJECT_ID/$REPO
+        sed -i "s|REGISTRY_URL|$REGISTRY_URL|g" infra/k8s/api/deployment.yaml
+        sed -i "s|IMAGE_TAG|$IMAGE_TAG|g"       infra/k8s/api/deployment.yaml
+        sed -i "s|REGISTRY_URL|$REGISTRY_URL|g" infra/k8s/worker/deployment.yaml
+        sed -i "s|IMAGE_TAG|$IMAGE_TAG|g"       infra/k8s/worker/deployment.yaml
+
+    - name: Apply Kubernetes manifests
+      run: |
+        kubectl apply -f infra/k8s/namespace.yaml
+        kubectl apply -f infra/k8s/api/
+        kubectl apply -f infra/k8s/worker/
+
+    - name: Wait for rollout
+      run: |
+        kubectl rollout status deployment/neuralgcm-api \
+          -n neuralgcm --timeout=5m
+        kubectl rollout status deployment/neuralgcm-worker \
+          -n neuralgcm --timeout=10m
+
+    - name: Run smoke tests
+      run: |
+        API_IP=$(kubectl get svc neuralgcm-api-lb -n neuralgcm \
+          -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+        if [ -n "$API_IP" ]; then
+          API_URL="http://$API_IP" bash infra/scripts/smoke_test.sh
+        else
+          echo "LoadBalancer IP not yet assigned — skipping smoke tests"
+        fi
+
+    - name: Notify on failure
+      if: failure()
+      run: |
+        echo "Deployment failed — rolling back"
+        kubectl rollout undo deployment/neuralgcm-api -n neuralgcm
+        kubectl rollout undo deployment/neuralgcm-worker -n neuralgcm
