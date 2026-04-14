@@ -1,0 +1,152 @@
+# ═══════════════════════════════════════════════════════════════
+# NeuralGCM Fine-Tuning Configuration
+# Dataset: ERA5 2024, Indian Subcontinent, 7 GRIB files
+# ═══════════════════════════════════════════════════════════════
+
+data:
+  grib_dir: "Fine Tuning"
+
+  # Single-level files (merged along time dimension)
+  single_level_files:
+    - "data1.grib"   # Jan-Mar 2024
+    - "data2.grib"   # Apr-Jun 2024
+    - "data3.grib"   # Jul-Sep 2024
+    - "data4.grib"   # Oct-Dec 2024
+
+  # Pressure-level files (merged along level dimension)
+  pressure_level_files:
+    - "pressurelevel1.grib"   # 50,100,150,200,250 hPa
+    - "pressurelevel2.grib"   # 350,450,550,650,750 hPa
+    - "pressurelevel3.grib"   # 800,850,900,950,1000 hPa
+
+  # All available pressure levels after merging (hPa)
+  pressure_levels:
+    [50, 100, 150, 200, 250, 350, 450, 550,
+     650, 750, 800, 850, 900, 950, 1000]
+
+  # Geographic bounds of your GRIB data
+  region:
+    lat_min:  6.0
+    lat_max: 37.0
+    lon_min: 68.0
+    lon_max: 97.0
+
+  # Analysis timestep in your GRIB files
+  data_timestep_hours: 6
+
+  # Train/test split — use last 30 days as test set
+  # (30 days = ~120 time steps at 6h interval)
+  test_days: 30
+
+  # Zarr cache paths (generated on first run, reused after)
+  cache_pressure_zarr: "neuralgcm_finetune/cache/pressure_levels.zarr"
+  cache_surface_zarr:  "neuralgcm_finetune/cache/surface_levels.zarr"
+  cache_merged_zarr:   "neuralgcm_finetune/cache/merged_dataset.zarr"
+
+model:
+  # GCS path — used if local cache missing
+  base_checkpoint_gcs:   "gs://neuralgcm/models/v1/deterministic_2_8_deg.pkl"
+  # Local cache path
+  base_checkpoint_local: "neuralgcm_finetune/checkpoints/base/deterministic_2_8_deg.pkl"
+  # Existing local cache (from forecast pipeline)
+  existing_checkpoint_cache: "cache/v1_deterministic_2_8_deg.pkl"
+  # NeuralGCM 2.8° grid properties
+  resolution_deg: 2.8
+  nlat: 64
+  nlon: 128
+  # Fine-tuning timestep (must match model pretraining)
+  timestep_hours: 6
+  # Model input variables (pressure-level)
+  input_vars:
+    - "u_component_of_wind"
+    - "v_component_of_wind"
+    - "temperature"
+    - "specific_humidity"
+    - "geopotential"
+    - "specific_cloud_liquid_water_content"
+    - "specific_cloud_ice_water_content"
+  # Log surface pressure (derived from surface pressure)
+  surface_vars:
+    - "log_surface_pressure"
+
+# ── PHASE A: Decoder fine-tuning ──────────────────────────────
+phase_a:
+  name: "decoder_finetune_india_2024"
+  modules_to_train: ["decoder"]
+  frozen_modules:   ["encoder", "learned_physics", "dynamical_core"]
+
+  rollout_steps: [1, 4]   # 1×6h=6h and 4×6h=24h rollouts
+  loss_type: "mse_regional"
+
+  # Regional loss mask — only penalise errors over India domain
+  # This prevents gradients from unobserved regions corrupting params
+  use_regional_mask: true
+
+  optimiser:      "adamw"   # adamw adds L2 regularisation
+  learning_rate:  5.0e-5    # lower than global (1 year = small data)
+  weight_decay:   1.0e-4    # L2 regularisation against overfitting
+  lr_schedule:    "cosine_decay"
+  lr_end:         5.0e-6
+  warmup_steps:   50
+
+  batch_size:     2         # 2 init times per gradient step
+  max_steps:      2000
+  eval_every:     100
+  save_every:     400
+  early_stop_patience: 8   # aggressive early stop (small dataset)
+  gradient_clip:  1.0
+  use_grad_checkpoint: true
+
+# ── PHASE B: Decoder + Learned Physics fine-tuning ────────────
+phase_b:
+  name: "physics_finetune_india_2024"
+  modules_to_train: ["decoder", "learned_physics"]
+  frozen_modules:   ["encoder", "dynamical_core"]
+
+  rollout_steps: [4, 8]   # 4×6h=24h and 8×6h=48h rollouts
+  loss_type: "filtered_mse_plus_spectral_regional"
+
+  # Paper loss weights (Appendix G.4) — reduced lambda_data
+  # because regional data has smaller sample size
+  lambda_data:  15.0    # paper uses 20 — reduced for 1-yr regional
+  lambda_spec:   0.05   # paper uses 0.1
+  lambda_bias:   1.5    # paper uses 2.0
+
+  use_regional_mask: true
+
+  optimiser:      "adamw"
+  learning_rate:  2.0e-5   # very conservative for physics module
+  weight_decay:   1.0e-4
+  lr_schedule:    "cosine_decay"
+  lr_end:         2.0e-6
+  warmup_steps:   100
+  adam_b1:        0.9
+  adam_b2:        0.95
+  adam_eps:       1.0e-6
+
+  batch_size:     1        # 48h rollout is heavy on CPU memory
+  max_steps:      2000
+  eval_every:     100
+  save_every:     400
+  early_stop_patience: 8
+  gradient_clip:  0.5
+  use_grad_checkpoint: true
+
+# ── EVALUATION ────────────────────────────────────────────────
+evaluation:
+  # Key metrics — all available in your pressure-level files
+  metrics:
+    - {var: "temperature",           level: 850,  name: "T850",  unit: "K"}
+    - {var: "temperature",           level: 500,  name: "T500",  unit: "K"}
+    - {var: "geopotential",          level: 500,  name: "Z500",  unit: "m"}
+    - {var: "specific_humidity",     level: 850,  name: "Q850",  unit: "g/kg"}
+    - {var: "u_component_of_wind",   level: 850,  name: "U850",  unit: "m/s"}
+    - {var: "v_component_of_wind",   level: 850,  name: "V850",  unit: "m/s"}
+  # Lead times to evaluate
+  lead_times_hours: [6, 24, 48, 72, 96, 120]
+  # Evaluate only over your data region
+  regional_eval: true
+
+logging:
+  level: "INFO"
+  log_file: "neuralgcm_finetune/logs/training.log"
