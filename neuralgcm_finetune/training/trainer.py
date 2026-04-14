@@ -16,7 +16,7 @@ Key adaptations for regional 1-year dataset:
 
 import os
 os.environ["JAX_PLATFORMS"]                 = "cpu"
-os.environ["XLA_FLAGS"]                     = "--xla_cpu_use_thunk_runtime=false"
+# XLA_FLAGS removed — xla_cpu_use_thunk_runtime is deprecated in JAX 0.9+
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.90"
 
