@@ -14,7 +14,7 @@ import os
 import sys
 
 os.environ["JAX_PLATFORMS"]                  = "cpu"
-os.environ["XLA_FLAGS"]                      = "--xla_cpu_use_thunk_runtime=false"
+# XLA_FLAGS removed — xla_cpu_use_thunk_runtime is deprecated in JAX 0.9+
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"]  = "false"
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.90"
 
@@ -52,7 +52,7 @@ def load_cfg() -> dict:
     if not cfg_path.exists():
         logger.error(f"Config not found: {cfg_path}")
         sys.exit(1)
-    with open(cfg_path) as f:
+    with open(cfg_path, encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
