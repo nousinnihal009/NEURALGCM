@@ -65,16 +65,35 @@ class IndiaEvaluator:
 
     def run(self) -> pd.DataFrame:
         """Run full evaluation, return results DataFrame."""
-        base_ckpt_path = self.config["model"].get(
-            "existing_checkpoint_cache",
-            "cache/v1_deterministic_2_8_deg.pkl")
-        ft_path = (
+        base_path = self.config["model"]["base_checkpoint_local"]
+        ft_path   = (
             "neuralgcm_finetune/checkpoints/best/"
             "finetuned_india_2024.pkl")
 
+        # Verify both exist before proceeding
+        from pathlib import Path
+        from loguru import logger
+
+        if not Path(base_path).exists():
+            logger.error(
+                f"Base checkpoint not found: {base_path}\n"
+                f"Run: python run_finetune.py --download-ckpt")
+            return pd.DataFrame()
+
+        if not Path(ft_path).exists():
+            logger.error(
+                f"Fine-tuned checkpoint not found: {ft_path}\n"
+                f"Run Phase A then Phase B first:\n"
+                f"  python run_finetune.py --phase a\n"
+                f"  python run_finetune.py --phase b")
+            return pd.DataFrame()
+
+        logger.info(f"Base model:       {base_path}")
+        logger.info(f"Fine-tuned model: {ft_path}")
+
         # Load base model
         logger.info("Loading base model...")
-        base_model = self._load_model(base_ckpt_path)
+        base_model = self._load_model(base_path)
 
         # Load fine-tuned model
         ft_model = None
