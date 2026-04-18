@@ -60,6 +60,13 @@ class IndiaERA5Sampler:
         self._test_times  = [t for t in all_times
                              if t >= split_time]
 
+        season_counts = {"monsoon": 0, "transition": 0, "winter": 0}
+        for t in self._train_times:
+            m = t.month
+            if m in [6,7,8,9]:       season_counts["monsoon"]    += 1
+            elif m in [4,5,10,11]:   season_counts["transition"] += 1
+            else:                    season_counts["winter"]     += 1
+
         logger.info(
             f"Sampler ready:\n"
             f"  Total steps:  {len(all_times)}\n"
@@ -68,7 +75,11 @@ class IndiaERA5Sampler:
             f"{self._train_times[-1].strftime('%Y-%m-%d')})\n"
             f"  Test steps:   {len(self._test_times)} "
             f"({self._test_times[0].strftime('%Y-%m-%d')} to "
-            f"{all_times[-1].strftime('%Y-%m-%d')})")
+            f"{all_times[-1].strftime('%Y-%m-%d')})\n"
+            f"Season distribution (train set):\n"
+            f"  Monsoon    (Jun-Sep): {season_counts['monsoon']} steps (3× weight)\n"
+            f"  Transition (Apr-May,Oct-Nov): {season_counts['transition']} steps (1.5× weight)\n"
+            f"  Winter     (Dec-Mar): {season_counts['winter']} steps (1× weight)")
 
     @property
     def train_times(self) -> List[pd.Timestamp]:
@@ -77,6 +88,25 @@ class IndiaERA5Sampler:
     @property
     def test_times(self) -> List[pd.Timestamp]:
         return self._test_times
+
+    def _get_sampling_weights(
+        self, times: list
+    ) -> np.ndarray:
+        """
+        Return per-timestep sampling weights.
+        Monsoon months (Jun-Sep) get 3× weight.
+        Pre-monsoon (Apr-May) and post-monsoon (Oct-Nov) get 1.5×.
+        Winter (Dec-Mar) gets 1× (baseline).
+        """
+        weights = np.ones(len(times), dtype=float)
+        for i, t in enumerate(times):
+            month = t.month
+            if month in [6, 7, 8, 9]:    # active monsoon
+                weights[i] = 3.0
+            elif month in [4, 5, 10, 11]: # transition seasons
+                weights[i] = 1.5
+            # Dec-Mar stays at 1.0 (winter baseline)
+        return weights / weights.sum()
 
     def sample_training_batch(
         self,
@@ -105,8 +135,13 @@ class IndiaERA5Sampler:
                 f"Reducing batch to {max(1, len(valid))}")
             batch_size = max(1, len(valid))
 
+        weights = self._get_sampling_weights(valid)
         chosen_idx = self.rng.choice(
-            len(valid), size=batch_size, replace=False)
+            len(valid),
+            size=min(batch_size, len(valid)),
+            replace=False,
+            p=weights,
+        )
         batch = []
 
         for idx in chosen_idx:
