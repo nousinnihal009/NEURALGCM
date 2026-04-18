@@ -154,8 +154,9 @@ class ERA5GRIBLoader:
         if self.merged_ds is None:
             raise RuntimeError("Call load_all() first")
         slc = self.merged_ds.sel(
-            time=t, method="nearest").compute()
-        return slc
+            time=t, method="nearest")
+        # CRITICAL: force compute — JAX cannot handle Dask arrays
+        return slc.compute()
 
     # ── PRESSURE-LEVEL LOADING ────────────────────────────────
 
@@ -191,6 +192,8 @@ class ERA5GRIBLoader:
             logger.info(f"  Reading: {f.name}")
             ds = self._read_grib_file(f, file_type="pressure")
             if ds is not None:
+                ds = self._standardise_coords(ds)
+                ds = ds.chunk({"time": min(100, ds.sizes.get("time", 100))})
                 self._log_dataset_summary(
                     ds, f.name, brief=True)
                 datasets.append(ds)
@@ -227,7 +230,7 @@ class ERA5GRIBLoader:
                          for l in sorted(all_levs.keys())]
                 merged = xr.concat(parts, dim="level")
 
-        merged = self._standardise_coords(merged)
+        merged = self._interpolate_to_standard_levels(merged)
         merged = self._rename_vars(merged)
 
         # Verify all expected levels are present
@@ -282,6 +285,8 @@ class ERA5GRIBLoader:
             logger.info(f"  Reading: {f.name}")
             ds = self._read_grib_file(f, file_type="surface")
             if ds is not None:
+                ds = self._standardise_coords(ds)
+                ds = ds.chunk({"time": min(100, ds.sizes.get("time", 100))})
                 self._log_dataset_summary(
                     ds, f.name, brief=True)
                 datasets.append(ds)
@@ -310,7 +315,6 @@ class ERA5GRIBLoader:
             merged = xr.merge(
                 datasets, compat="override", join="outer")
 
-        merged = self._standardise_coords(merged)
         merged = self._rename_vars(merged)
 
         # Derive log_surface_pressure from surface_pressure
@@ -339,6 +343,50 @@ class ERA5GRIBLoader:
         merged.to_zarr(str(sl_cache), mode="w")
         logger.success(f"Surface-level cache saved: {sl_cache}")
         return merged
+
+    def verify_log_surface_pressure(self):
+        """Verify log_surface_pressure is correct in merged dataset."""
+        from loguru import logger
+        import numpy as np
+
+        if "log_surface_pressure" not in self.merged_ds.data_vars:
+            # Try to derive it now from surface_pressure
+            if "surface_pressure" in self.merged_ds.data_vars:
+                sp = self.merged_ds["surface_pressure"]
+                sp_mean = float(sp.mean().compute()
+                                if hasattr(sp.data, "compute")
+                                else sp.mean())
+                if sp_mean < 2000:  # hPa → convert to Pa
+                    sp = sp * 100.0
+                self.merged_ds["log_surface_pressure"] = np.log(
+                    sp.clip(min=1.0))
+                logger.success(
+                    f"Derived log_surface_pressure | "
+                    f"mean={float(self.merged_ds['log_surface_pressure'].mean()):.4f} "
+                    f"(expected ~11.5 for sea-level)")
+            else:
+                logger.error(
+                    "CRITICAL: Neither surface_pressure nor "
+                    "log_surface_pressure found. "
+                    "NeuralGCM encoder will fail. "
+                    "Check that data*.grib files contain 'sp' variable.")
+                return False
+        else:
+            lnsp_mean = float(
+                self.merged_ds["log_surface_pressure"].mean().compute()
+                if hasattr(self.merged_ds["log_surface_pressure"].data,
+                           "compute")
+                else self.merged_ds["log_surface_pressure"].mean())
+            if 10.5 < lnsp_mean < 12.5:
+                logger.success(
+                    f"log_surface_pressure verified | "
+                    f"mean={lnsp_mean:.4f} (expected 10.5–12.5)")
+            else:
+                logger.warning(
+                    f"log_surface_pressure mean={lnsp_mean:.4f} "
+                    f"is OUTSIDE expected range 10.5–12.5. "
+                    f"Check units: SP should be in Pa before ln().")
+        return True
 
     # ── MERGE PRESSURE + SURFACE ──────────────────────────────
 
@@ -499,6 +547,46 @@ class ERA5GRIBLoader:
                        key=lambda d: len(d.data_vars))
 
     # ── STANDARDISATION ───────────────────────────────────────
+
+    def _interpolate_to_standard_levels(
+        self, ds: xr.Dataset
+    ) -> xr.Dataset:
+        """
+        Interpolate pressure-level data to standard ERA5 levels.
+        NeuralGCM encoder was pretrained on these exact levels.
+        Your dataset has non-standard intermediates (350,450 etc.)
+        that need to be remapped.
+        """
+        STANDARD_LEVELS = [50, 100, 150, 200, 250, 300,
+                           400, 500, 600, 700, 850, 925, 1000]
+        if "level" not in ds.coords:
+            return ds
+        current_levels = sorted(ds.level.values.tolist())
+        from loguru import logger
+        logger.info(
+            f"Interpolating levels: {current_levels} → "
+            f"{STANDARD_LEVELS}")
+        # Only interpolate levels within the range of your data
+        data_min = min(current_levels)
+        data_max = max(current_levels)
+        target   = [l for l in STANDARD_LEVELS
+                    if data_min <= l <= data_max]
+        try:
+            ds_interp = ds.interp(
+                level=target,
+                method="linear",
+                kwargs={"fill_value": "extrapolate"},
+            )
+            logger.success(
+                f"Interpolated to {len(target)} standard levels: "
+                f"{target}")
+            return ds_interp
+        except Exception as e:
+            logger.warning(
+                f"Interpolation failed: {e}. "
+                f"Using original levels — this may affect "
+                f"encoder accuracy.")
+            return ds
 
     def _standardise_coords(self, ds: xr.Dataset) -> xr.Dataset:
         """Standardise coordinate names to ERA5 conventions."""
