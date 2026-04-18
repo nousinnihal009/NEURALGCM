@@ -162,6 +162,40 @@ class IndiaFineTuner:
             logger.warning(f"Param extraction: {e}")
             self.params = {}
 
+    def _split_params(self, phase: str) -> Tuple[Dict, Dict]:
+        """Split model params into trainable and frozen sets based on phase config."""
+        phase_cfg = self.config[f"phase_{phase}"]
+        modules = phase_cfg["modules_to_train"]
+        
+        trainable = {}
+        frozen = {}
+        
+        try:
+            for mod_name, mod_dict in self.params.items():
+                is_train = any(m in mod_name for m in modules)
+                if is_train:
+                    trainable[mod_name] = mod_dict
+                else:
+                    frozen[mod_name] = mod_dict
+        except Exception as e:
+            logger.error(f"Error splitting params: {e}")
+            
+        return trainable, frozen
+
+    def _patch_model_params(self, new_params: Dict):
+        """
+        Creates a shallow copy of the model PyTree with updated params.
+        Required for JAX so Tracers are explicitly passed to NeuralGCM methods.
+        """
+        import copy
+        new_model = copy.copy(self.model)
+        # Handle both _params (Haiku/Flax hidden) and params
+        if hasattr(new_model, '_params'):
+            new_model._params = new_params
+        if hasattr(new_model, 'params'):
+            new_model.params = new_params
+        return new_model
+
         logger.success(
             f"Trainer ready | "
             f"model_grid=({len(self._model_lats)}x"
@@ -197,8 +231,10 @@ class IndiaFineTuner:
             optax.scale(-1.0),
         )
 
-    def _run_forward_and_loss(
+    def _compute_step_loss(
         self,
+        trainable_params: Dict,
+        frozen_params: Dict,
         init_ds: xr.Dataset,
         targets: List[Optional[xr.Dataset]],
         rollout_steps: int,
@@ -206,27 +242,36 @@ class IndiaFineTuner:
         rng_key,
     ) -> Tuple[float, Dict]:
         """
-        Run one forward pass (encode -> unroll -> loss).
-        This is the core computation that computes predictions
-        and compares them to ERA5 targets over the India domain.
+        Run one forward pass (encode -> unroll -> loss) with explicit Tracers.
         """
         from dinosaur import xarray_utils
 
+        # Defensive: ensure init_ds is concrete (not Dask-backed)
+        for var in list(init_ds.data_vars):
+            if hasattr(init_ds[var].data, 'compute'):
+                init_ds[var] = init_ds[var].compute()
+
         phase_cfg = self.config[f"phase_{phase}"]
         ts_h = self.config["model"]["timestep_hours"]
+
+        # Merge params to form the complete model parameter tree
+        merged_params = {**trainable_params, **frozen_params}
+        
+        # Patch the PyTree instance so gradients flow properly through Traders
+        patched_model = self._patch_model_params(merged_params)
 
         try:
             # Build regridder for this init state
             from neuralgcm_weather.model.runner import (
                 build_regridder, regrid_init_state)
 
-            regridder = build_regridder(init_ds, self.model)
+            regridder = build_regridder(init_ds, patched_model)
             ev = regrid_init_state(init_ds, regridder)
 
             # Encode initial state
-            inputs   = self.model.inputs_from_xarray(ev)
-            forcings = self.model.forcings_from_xarray(ev)
-            state    = self.model.encode(inputs, forcings, rng_key)
+            inputs   = patched_model.inputs_from_xarray(ev)
+            forcings = patched_model.forcings_from_xarray(ev)
+            state    = patched_model.encode(inputs, forcings, rng_key)
 
             # Build temporal forcings
             temporal_forcings = {
@@ -236,7 +281,7 @@ class IndiaFineTuner:
 
             # Unroll model forward
             n_steps = min(rollout_steps, 4)  # cap per-step for stability
-            _, preds = self.model.unroll(
+            _, preds = patched_model.unroll(
                 state,
                 temporal_forcings,
                 steps=n_steps,
@@ -250,7 +295,7 @@ class IndiaFineTuner:
 
             # Handle namedtuple/dict pred types
             try:
-                preds_ds = self.model.data_to_xarray(
+                preds_ds = patched_model.data_to_xarray(
                     preds, times=times_td)
             except Exception:
                 if hasattr(preds, '_asdict'):
@@ -260,7 +305,7 @@ class IndiaFineTuner:
                     }
                 else:
                     preds_dict = preds
-                preds_ds = self.model.data_to_xarray(
+                preds_ds = patched_model.data_to_xarray(
                     preds_dict, times=times_td)
 
         except Exception as e:
@@ -369,16 +414,37 @@ class IndiaFineTuner:
             rng, step_rng = jax.random.split(rng)
             t0 = time.time()
 
-            # Forward pass and loss for each sample in batch
+            # Initialize optimizer and split params
+            trainable_params, frozen_params = self._split_params(phase)
+            opt = self._make_optimiser(phase_cfg)
+            opt_state = opt.init(trainable_params)
+
+            # Define exact gradient wrapper
+            def loss_fn(tp):
+                init_ds, targets = batch[0]
+                l, _ = self._compute_step_loss(
+                    tp, frozen_params, init_ds, targets, rollout, phase, step_rng)
+                return l
+
             batch_losses = []
             batch_info = {}
             for init_ds, tgt_list in batch:
                 try:
-                    loss_val, info = self._run_forward_and_loss(
-                        init_ds, tgt_list, rollout, phase,
-                        step_rng)
+                    # We compute gradients independently per batch sample and accumulate via mean
+                    # (Standard JAX accumulation can be optimized with vmap, but this maps gracefully for memory)
+                    loss_val, grads = jax.value_and_grad(loss_fn)(trainable_params)
+                    
+                    # Update weights via Optax
+                    updates, opt_state = opt.update(grads, opt_state, trainable_params)
+                    trainable_params = optax.apply_updates(trainable_params, updates)
+                    
+                    # Store updated params back on core model tracker
+                    self.params = {**trainable_params, **frozen_params}
+                    patched_eval = self._patch_model_params(self.params)
+                    self.model = patched_eval # persist patched model for saving/cache
+
                     batch_losses.append(loss_val)
-                    batch_info = info
+                    # batch_info = info
                 except Exception as e:
                     logger.debug(f"Step {step} sample failed: {e}")
                     continue
@@ -471,8 +537,9 @@ class IndiaFineTuner:
                 tgt_ds  = self.loader.get_init_state(
                     nearest, press_vars, surf_vars)
 
-                loss_v, _ = self._run_forward_and_loss(
-                    init_ds, [None, None, None, tgt_ds],
+                trainable_val, frozen_val = self._split_params(phase)
+                loss_v, _ = self._compute_step_loss(
+                    trainable_val, frozen_val, init_ds, [None, None, None, tgt_ds],
                     4, phase, rng)
                 losses.append(float(loss_v))
             except Exception as e:
