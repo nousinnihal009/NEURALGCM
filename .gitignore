@@ -53,3 +53,12 @@ frontend/dist/
 # Cache
 cache/
 .neuralgcm/
+
+# Data Files & Caches
+*.grib
+*.grib.idx
+neuralgcm_finetune/cache/
+neuralgcm_finetune/checkpoints/
+neuralgcm_finetune/results/
+neuralgcm_finetune/logs/
+"Fine Tuning"/
