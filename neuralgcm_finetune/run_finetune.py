@@ -129,6 +129,7 @@ def cmd_verify(args):
 
     print(f"\n  Dataset verified successfully.")
     print(f"{'=' * 60}\n")
+    loader.verify_log_surface_pressure()
 
 
 def cmd_download(args):
@@ -179,6 +180,7 @@ def cmd_phase(args):
     with open(h_path, "w") as f:
         json.dump(history, f, default=str, indent=2)
     logger.success(f"History saved: {h_path}")
+    plot_training_curves(args.phase)
 
     # After phase B, save final checkpoint
     if args.phase == "b":
@@ -189,6 +191,148 @@ def cmd_phase(args):
                 "  To use in forecasts, load with:\n"
                 f"    neuralgcm.PressureLevelModel."
                 f"from_checkpoint('{out}')")
+
+def plot_training_curves(phase: str):
+    """Plot train loss and val loss from saved history JSON."""
+    import json, matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from pathlib import Path
+
+    h_path = (f"neuralgcm_finetune/logs/"
+              f"history_phase_{phase}.json")
+    if not Path(h_path).exists():
+        return
+
+    with open(h_path) as f:
+        history = json.load(f)
+
+    steps = history.get("step", [])
+    losses = history.get("loss", [])
+    val_data = history.get("val_loss", [])
+
+    DARK  = "#0d1117"; PANEL = "#161b22"; BORDER = "#30363d"
+    fig, ax = plt.subplots(figsize=(12, 5), facecolor=DARK)
+    ax.set_facecolor(PANEL)
+
+    if steps and losses:
+        ax.plot(steps, losses, color="#58A6FF", lw=1.5,
+                alpha=0.7, label="Train loss")
+
+        # Moving average
+        if len(losses) > 20:
+            import numpy as np
+            ma = np.convolve(losses,
+                             np.ones(20)/20, mode="valid")
+            ax.plot(steps[19:], ma, color="#58A6FF",
+                    lw=2.5, label="Train loss (MA-20)")
+
+    if val_data:
+        val_steps = [v["step"] for v in val_data]
+        val_losses = [v["val"] for v in val_data]
+        ax.plot(val_steps, val_losses, color="#3FB950",
+                lw=2.5, marker="o", ms=5,
+                label="Validation loss")
+
+    ax.set_title(
+        f"Phase {phase.upper()} Training Curves — "
+        f"India ERA5 2024",
+        color="white", fontsize=12, fontweight="bold")
+    ax.set_xlabel("Step", color="white", fontsize=10)
+    ax.set_ylabel("Loss", color="white", fontsize=10)
+    ax.tick_params(colors="white")
+    ax.grid(True, color=BORDER, ls="--", alpha=0.5)
+    for sp in ax.spines.values():
+        sp.set_edgecolor(BORDER)
+    ax.legend(fontsize=9, facecolor=PANEL,
+              labelcolor="white", edgecolor=BORDER)
+
+    out = Path("neuralgcm_finetune/results")
+    out.mkdir(parents=True, exist_ok=True)
+    outpath = out / f"training_curves_phase_{phase}.png"
+    plt.savefig(outpath, dpi=150,
+                bbox_inches="tight", facecolor=DARK)
+    plt.close()
+    from loguru import logger
+    logger.success(f"Training curve saved: {outpath}")
+
+def cmd_test_gradient(args):
+    """
+    Test that gradients flow correctly through the fine-tuning setup.
+    Run this before starting Phase A to catch wiring bugs early.
+    """
+    config  = load_cfg()
+    loader, sampler = get_loader_and_sampler(config)
+
+    from neuralgcm_finetune.training.trainer import IndiaFineTuner
+    trainer = IndiaFineTuner(config, loader, sampler)
+    trainer.setup()
+
+    logger.info("Testing gradient computation (Phase A wiring)...")
+    trainable, frozen = trainer._split_params("a")
+
+    # Sample one tiny batch
+    batch = sampler.sample_training_batch(
+        batch_size=1,
+        rollout_steps=1,
+        pressure_vars=config["model"]["input_vars"],
+        surface_vars=config["model"]["surface_vars"],
+        timestep_hours=6,
+    )
+    if not batch:
+        logger.error("No training batch available — check dataset")
+        return
+
+    import jax
+    import jax.numpy as jnp
+
+    rng = jax.random.key(0)
+
+    def loss_fn(tp):
+        init_ds, targets = batch[0]
+        l, _ = trainer._compute_step_loss(
+            tp, frozen, init_ds, targets, 1, "a", rng)
+        return l
+
+    logger.info("  Computing value_and_grad...")
+    try:
+        val, grads = jax.value_and_grad(loss_fn)(trainable)
+        logger.success(f"  Loss value: {float(val):.6f}")
+
+        # Check that gradients are non-zero and non-NaN
+        grad_leaves = jax.tree.leaves(grads)
+        n_nonzero = sum(
+            1 for g in grad_leaves
+            if jnp.any(g != 0))
+        n_nan = sum(
+            1 for g in grad_leaves
+            if jnp.any(jnp.isnan(g)))
+        n_total = len(grad_leaves)
+
+        logger.info(
+            f"  Gradient stats: "
+            f"{n_nonzero}/{n_total} arrays non-zero | "
+            f"{n_nan} NaN arrays")
+
+        if n_nan > 0:
+            logger.error(
+                f"  {n_nan} gradient arrays contain NaN! "
+                "Check loss.py for division by zero in "
+                "area_weights or spectral_mse.")
+        if n_nonzero == 0:
+            logger.error(
+                "  ALL gradients are zero! "
+                "The trainable params are not in the "
+                "computation graph. Fix _compute_step_loss "
+                "to use trainable params explicitly.")
+        if n_nonzero > 0 and n_nan == 0:
+            logger.success(
+                "  Gradient test PASSED. "
+                "Fine-tuning is correctly wired.")
+    except Exception as e:
+        logger.error(f"  Gradient computation failed: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 def cmd_evaluate(args):
@@ -245,6 +389,9 @@ def main():
         "--evaluate", action="store_true",
         help="Evaluate base vs fine-tuned model")
     g.add_argument(
+        "--test-gradient", action="store_true",
+        help="Verify gradient flow before training")
+    g.add_argument(
         "--all", action="store_true",
         help="Run all phases then evaluate")
     args = p.parse_args()
@@ -257,6 +404,8 @@ def main():
         cmd_phase(args)
     elif args.evaluate:
         cmd_evaluate(args)
+    elif args.test_gradient:
+        cmd_test_gradient(args)
     elif args.all:
         cmd_all(args)
 
